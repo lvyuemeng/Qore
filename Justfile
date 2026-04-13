@@ -1,26 +1,27 @@
 set shell := ["bash", "-cu"]
 set windows-shell := ["powershell", "-NoProfile", "-Command"]
 
+ai-refs:
+    #!/usr/bin/env bash
+    mkdir -p .ai/refs
+    if [ -d .ai/refs/akshare/.git ]; then
+        git -C .ai/refs/akshare pull --ff-only
+    else
+        git clone --depth=1 https://github.com/akfamily/akshare .ai/refs/akshare
+    fi
+
 # ------------------------
 # Test tasks
 # ------------------------
 
 test:
-    uv run pytest tests/
+    uv run pytest
 
 test-coverage:
-    uv run pytest tests/ --cov=notebooks/utils --cov-report=html
+    uv run pytest --cov=crates --cov=src --cov-report=html
 
 test-ci:
-    uv run pytest tests/ --cov=notebooks/utils --cov-report=term-missing
-
-# Smoke test with argument
-# Usage: just smoke-test smoke_bao
-smoke-test file:
-    uv run python -m tests.{{file}}
-
-smoke-run file:
-    uv run python -m scripts.{{file}}
+    uv run pytest --cov=crates --cov=src --cov-report=term-missing
 
 # ------------------------
 # Lint / format / typing
@@ -35,5 +36,5 @@ lint-fix:
 format:
     uv run ruff format .
 
-typecheck:
-    uv run mypy .
+type:
+	uv run ty .

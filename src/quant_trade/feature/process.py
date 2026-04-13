@@ -6,7 +6,7 @@ behavioral indicators, and macro context features.
 """
 
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -15,7 +15,6 @@ import polars.selectors as cs
 from quant_trade.config.logger import log
 
 from ..transform import GSIZE
-
 
 
 class Fundamental:

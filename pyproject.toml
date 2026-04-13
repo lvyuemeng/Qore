@@ -1,96 +1,46 @@
 [project]
-name = "quant-trade"
+name = "qore-workspace"
 version = "0.1.0"
-description = "Quantitative trading self-learning project"
+description = "Qore quantitative platform workspace"
 readme = "README.md"
 requires-python = ">=3.13"
-
-dependencies = [
-    # book
-    "marimo>=0.19.4",
-    # data source
-    "akshare>=1.0",
-    "baostock>=0.8.9",
-    "fastexcel>=0.19.0",
-    # Http
-    "httpx[http2]>=0.28.1",
-    "asyncio>=4.0.0",
-    "tenacity>=9.1.3",
-    # data processing
-    "numpy>=2.0",
-    "narwhals>=1.0",
-    "polars>=1.0",
-    "pyarrow>=15.0",
-    # data visualization
-    "plotly>=5.20",
-    "seaborn>=0.13",
-    # ML
-    "scipy>=1.17.0",
-    "lightgbm>=4.6.0",
-    "optuna>=4.7.0",
-    # "backtrader>=1.9.78.123",
-    # logging
-    "loguru>=0.7.3",
-    # config
-    # "pyyaml>=6.0.3",
-    # database
-    "arcticdb>=6.8.0",
-    "xlsxwriter>=3.2.9",
-]
+dependencies = []
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    # "pytest-asyncio>=0.23",
+    "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
-    "mypy>=1.19.1",
     "ruff>=0.14.13",
-    # "types-PyYAML",
+    "ty>=0.0.29",
 ]
-    
+
 [tool.uv]
-package = true
+package = false
+
+[tool.uv.workspace]
+members = ["crates/*"]
+
+[tool.uv.sources]
+qore-core = { workspace = true }
+qore-data = { workspace = true }
+qore-factor = { workspace = true }
+qore-intelligence = { workspace = true }
+qore-runner = { workspace = true }
+qore-backtest = { workspace = true }
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["crates", "tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-# asyncio_mode = "auto"
 addopts = "-v --tb=short"
 
 [tool.ruff]
-target-version = "py313"  # Modern Python target
+target-version = "py313"
 
 [tool.ruff.lint]
-select = [
-    "E",    # pycodestyle errors
-    "F",    # Pyflakes
-    "I",    # isort (import sorting)
-    "UP",   # pyupgrade (Python upgrade checks)
-    "W",    # pycodestyle warnings
-    "B",    # flake8-bugbear (common bugs/design issues)
-    "C4",   # flake8-comprehensions
-    "SIM",  # flake8-simplify
-    "PERF", # Perflint (performance anti-patterns)
-    "RUF",  # Ruff-specific rules
-    # "N",    # pep8-naming (naming conventions)
-]
-ignore = [
-    "E501",  # Line too long (handled by formatter)
-    "RUF003",
-    "RUF012",
-    "PERF401",
-    # "N803",  # Argument name should be lowercase (allow X, W, b for ML)
-    # "N806",  # Variable in function should be lowercase (allow X, W, b for ML)
-    # "N812",  # Lowercase imported as non-lowercase (allow import Tensor as T)
-]
-
-# [tool.ruff.lint.pep8-naming]
-# # Allow single uppercase letters for common ML variables
-# extend-ignore-names = ["X", "Y", "W", "b", "A", "Z", "N", "T"]
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
+select = ["E", "F", "I", "UP", "W", "B", "C4", "SIM", "PERF", "RUF"]
+ignore = ["E501", "RUF003", "RUF012", "PERF401"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -98,17 +48,3 @@ line-ending = "lf"
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
-
-[tool.mypy]
-python_version = "3.13"
-strict = true
-warn_return_any = true
-warn_unused_ignores = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-disallow_untyped_decorators = true
-warn_redundant_casts = true
-warn_unused_configs = true
-show_error_codes = true
-pretty = true

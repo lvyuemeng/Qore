@@ -1,5 +1,6 @@
-import polars as pl
 from typing import Literal, Protocol
+
+import polars as pl
 
 
 @staticmethod
@@ -36,7 +37,7 @@ class MetricProvider(Protocol):
     def inputs(self) -> list[str]: ...
     @property
     def outputs(self) -> list[str]: ...
-    
+
     def stages(self) -> list[list[pl.Expr]]:
         """
         Returns a list of stages. 
@@ -47,8 +48,8 @@ class MetricProvider(Protocol):
 
 class MetricEngine:
     def __init__(
-        self, 
-        providers: list[MetricProvider], 
+        self,
+        providers: list[MetricProvider],
         ident_cols: list[str],
         mode: Literal["append", "select"] = "append"
     ):
@@ -59,19 +60,19 @@ class MetricEngine:
     def compute(self, df: pl.DataFrame) -> pl.DataFrame:
         max_stages = max(len(p.stages()) for p in self.providers)
         result = df.lazy() # Use LazyFrame for better plan optimization
-        
+
         for stage_idx in range(max_stages):
             current_stage_exprs = []
             for p in self.providers:
                 p_stages = p.stages()
                 if stage_idx < len(p_stages):
                     current_stage_exprs.extend(p_stages[stage_idx])
-            
+
             if current_stage_exprs:
                 result = result.with_columns(current_stage_exprs)
 
         if self.mode == "select":
             all_outputs = [out for p in self.providers for out in p.outputs]
             result = result.select([*self.ident_cols, *all_outputs])
-            
+
         return result.collect()

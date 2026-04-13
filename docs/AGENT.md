@@ -1,57 +1,107 @@
-# Quantitative Trading Project
+# Qore Agent Introduction
 
-## Overview
-Self-learning environment for quantitative trading strategies using Marimo notebooks.
+This repository is the `Qore` rewrite workspace.
 
-## Tech Stack
-- marimo - notebook interface
-- polars - dataframe library
-- narwhals - pandas/polars compatibility
-- akshare - Chinese market data
+- Treat `docs/design.md` as the canonical architecture specification.
+- Treat `docs/roadmap.md` as the execution order and status tracker.
+- Implement new work only under `crates/qore-*` unless migration support is required.
+- Keep the stack aligned with the design: Python 3.13, uv workspace, Polars lazy pipelines, DuckDB + Parquet, strict typing.
+- Never import `akshare` in crate runtime code; use `.ai/refs/akshare/` only for endpoint reverse engineering.
+- Use `singledispatch` for instrument-specific behavior; do not add `isinstance` routing.
+- Every class needing paths or tuning parameters must expose `from_config(config: QoreConfig)`.
 
-## Quick Start
+## Workspace Basics
+
+Install and sync the workspace:
+
 ```bash
-uv sync        # install deps
-marimo run path-to.py     # start notebook server
+uv sync --dev
 ```
 
-## Code Patterns
+Run commands from the repository root so workspace packages resolve correctly.
 
-Emphasize on:
-- Type consistency
-- Logic consistency and robustness
-- Functional style as could
+## Basic uv Commands
 
-### Fetching Data
-```python
-import akshare as ak
-import narwhals as nw
+Run all tests:
 
-df = nw.from_native(ak.stock_zh_a_spot(), eager_only=True)
+```bash
+uv run pytest
 ```
 
-### Polars Operations
-```python
-df.filter(pl.col("涨跌幅") > 5)
+Run one test file:
+
+```bash
+uv run pytest crates/qore-core/tests/test_core_smoke.py
 ```
 
-## Configuration
+Run lint checks:
 
-See `pyproject.toml` for dependencies.
+```bash
+uv run ruff check .
+```
 
-## Commands
+Auto-fix lint issues when safe:
 
-| Command | Purpose |
-|---------|---------|
-| `uv sync` | Install dependencies |
-| `marimo run` | Notebook server |
-| `pytest tests/` | Run tests |
-| `ruff check .` | Lint code |
-| `ruff format .` | Format code |
-| `mypy .` | Type check |
+```bash
+uv run ruff check --fix .
+```
 
-## Notes
-- Keep notebooks in `notebooks/`
-- Use narwhals when interfacing with akshare
-- Tests live in `tests/`
-- Utility modules in `notebooks/utils/`
+Format the codebase:
+
+```bash
+uv run ruff format .
+```
+
+Type check the codebase:
+
+```bash
+uv run ty check .
+```
+
+If `ty` is not installed in the environment yet, add it to dev dependencies first or run it as a tool.
+
+## Existing Just Recipes
+
+The root `Justfile` already exposes the common entrypoints:
+
+```bash
+just test
+just lint
+just format
+just type
+```
+
+These recipes currently map to:
+
+- `just test` -> `uv run pytest`
+- `just lint` -> `uv run ruff check .`
+- `just format` -> `uv run ruff format .`
+- `just type` -> `uv run ty .`
+
+## Crate-Scoped Examples
+
+Run a single crate's tests:
+
+```bash
+uv run pytest crates/qore-factor/tests
+```
+
+Run a module with workspace imports enabled:
+
+```bash
+uv run python -m qore_data.fetch
+```
+
+Run a one-off Python snippet inside the workspace environment:
+
+```bash
+uv run python -c "from qore_core import QoreConfig; print(QoreConfig())"
+```
+
+## Agent Working Rules
+
+- Read `docs/design.md` before structural work.
+- Update `docs/roadmap.md` when a roadmap item materially changes state.
+- Prefer focused crate tests after changes, then broader checks.
+- Keep new code ASCII unless the file already requires non-ASCII content.
+- Do not treat legacy `src/quant_trade` as the target architecture.

@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pyarrow as pa
+
+
+@dataclass(frozen=True, slots=True)
+class Dataset:
+    name: str
+    schema: pa.Schema
+    partition_cols: list[str]
+    dedup_keys: list[str]
+
+
+DATASETS: dict[str, Dataset] = {
+    "stock_ohlcv": Dataset(
+        name="stock_ohlcv",
+        schema=pa.schema(
+            [
+                ("date", pa.date32()),
+                ("symbol", pa.string()),
+                ("open", pa.float64()),
+                ("high", pa.float64()),
+                ("low", pa.float64()),
+                ("close", pa.float64()),
+                ("volume", pa.int64()),
+                ("amount", pa.float64()),
+                ("adj_factor", pa.float64()),
+                ("is_suspended", pa.bool_()),
+                ("limit_up", pa.bool_()),
+                ("limit_down", pa.bool_()),
+            ]
+        ),
+        partition_cols=["year", "symbol"],
+        dedup_keys=["date", "symbol"],
+    ),
+    "fund_nav": Dataset(
+        name="fund_nav",
+        schema=pa.schema(
+            [
+                ("date", pa.date32()),
+                ("symbol", pa.string()),
+                ("nav", pa.float64()),
+                ("acc_nav", pa.float64()),
+                ("daily_return", pa.float64()),
+            ]
+        ),
+        partition_cols=["year", "symbol"],
+        dedup_keys=["date", "symbol"],
+    ),
+    "derivative_ohlcv": Dataset(
+        name="derivative_ohlcv",
+        schema=pa.schema(
+            [
+                ("date", pa.date32()),
+                ("symbol", pa.string()),
+                ("open", pa.float64()),
+                ("high", pa.float64()),
+                ("low", pa.float64()),
+                ("close", pa.float64()),
+                ("volume", pa.int64()),
+                ("amount", pa.float64()),
+                ("open_interest", pa.int64()),
+                ("settle_price", pa.float64()),
+            ]
+        ),
+        partition_cols=["year", "symbol"],
+        dedup_keys=["date", "symbol"],
+    ),
+    "fundamentals": Dataset(
+        name="fundamentals",
+        schema=pa.schema(
+            [
+                ("report_date", pa.date32()),
+                ("announce_date", pa.date32()),
+                ("symbol", pa.string()),
+                ("pe_ttm", pa.float64()),
+                ("pb", pa.float64()),
+                ("ps_ttm", pa.float64()),
+                ("ev_ebitda", pa.float64()),
+                ("roe", pa.float64()),
+                ("roa", pa.float64()),
+                ("gross_margin", pa.float64()),
+                ("revenue", pa.float64()),
+                ("net_income", pa.float64()),
+                ("total_assets", pa.float64()),
+                ("operating_cashflow", pa.float64()),
+            ]
+        ),
+        partition_cols=["year", "symbol"],
+        dedup_keys=["announce_date", "symbol", "report_date"],
+    ),
+    "factor_scores": Dataset(
+        name="factor_scores",
+        schema=pa.schema(
+            [
+                ("date", pa.date32()),
+                ("symbol", pa.string()),
+                ("factor_name", pa.string()),
+                ("raw_value", pa.float64()),
+                ("z_score", pa.float64()),
+                ("rank_pct", pa.float64()),
+            ]
+        ),
+        partition_cols=["date_month", "factor_name"],
+        dedup_keys=["date", "symbol", "factor_name"],
+    ),
+    "news_scores": Dataset(
+        name="news_scores",
+        schema=pa.schema(
+            [
+                ("date", pa.date32()),
+                ("symbol", pa.string()),
+                ("score", pa.float64()),
+                ("event_type", pa.string()),
+                ("source_layer", pa.string()),
+            ]
+        ),
+        partition_cols=["date_month"],
+        dedup_keys=["date", "symbol"],
+    ),
+}
