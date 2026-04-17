@@ -8,6 +8,56 @@ from qore_factor.base import FundamentalFactor
 
 
 @dataclass(slots=True)
+class GrossMarginFactor(FundamentalFactor):
+    name: str = "gross_margin"
+    produces: str = "gross_margin"
+    requires: frozenset[str] = frozenset({"revenue", "gross_margin"})
+
+    def compute(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        return lf.with_columns(
+            pl.col("gross_margin").cast(pl.Float64).alias(self.produces)
+        )
+
+
+@dataclass(slots=True)
+class AssetTurnoverFactor(FundamentalFactor):
+    name: str = "asset_turnover"
+    produces: str = "asset_turnover"
+    requires: frozenset[str] = frozenset({"revenue", "total_assets"})
+
+    def compute(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        return lf.with_columns(
+            (pl.col("revenue") / (pl.col("total_assets") + 1e-8)).alias(self.produces)
+        )
+
+
+@dataclass(slots=True)
+class CFOYieldFactor(FundamentalFactor):
+    name: str = "cfo_yield"
+    produces: str = "cfo_yield"
+    requires: frozenset[str] = frozenset({"cfo", "total_assets"})
+
+    def compute(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        return lf.with_columns(
+            (pl.col("cfo") / (pl.col("total_assets") + 1e-8)).alias(self.produces)
+        )
+
+
+@dataclass(slots=True)
+class AccrualRatioFactor(FundamentalFactor):
+    name: str = "accrual_ratio"
+    produces: str = "accrual_ratio"
+    requires: frozenset[str] = frozenset({"net_income", "cfo", "total_assets"})
+
+    def compute(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        return lf.with_columns(
+            (
+                (pl.col("net_income") - pl.col("cfo")) / (pl.col("total_assets") + 1e-8)
+            ).alias(self.produces)
+        )
+
+
+@dataclass(slots=True)
 class ROEStabilityFactor(FundamentalFactor):
     window: int = 8
     name: str = "roe_stability"

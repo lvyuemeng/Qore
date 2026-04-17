@@ -20,7 +20,7 @@ Parquet lake), Pydantic v2, mypy strict, ruff, pytest.
 
 ### 1.1 Monorepo structure
 
-```
+```text
 qore/
 ├── .ai/
 │   ├── refs/              ← cloned reference repos (gitignored)
@@ -48,17 +48,19 @@ qore/
 ## Coding rules for Qore
 
 ### Data layer
+
 - Never import akshare directly in any crate source file.
 - To understand an eastmoney endpoint, READ .ai/refs/akshare/ first.
   Key paths:
-    akshare/stock/stock_zh_a_hist.py      ← A-share OHLCV (kline endpoint)
-    akshare/fund/fund_em_*.py             ← Fund NAV endpoints
-    akshare/stock/stock_individual_info_em.py ← Stock fundamentals
-    akshare/index/index_stock_cons_*.py   ← Index constituent APIs
+  akshare/stock/stock_zh_a_hist.py ← A-share OHLCV (kline endpoint)
+  akshare/fund/fund_em_*.py ← Fund NAV endpoints
+  akshare/stock/stock_individual_info_em.py ← Stock fundamentals
+  akshare/index/index_stock_cons_*.py ← Index constituent APIs
   Pattern: find the URL, params, and response field mapping, then
   reimplement in qore_data/fetcher/eastmoney.py using httpx.
 
 ### Dispatch
+
 - Use singledispatch for all instrument-type-specific operations.
 - Never write: if isinstance(inst, StockInstrument): ...
   Write: the dispatch function itself.
@@ -66,6 +68,7 @@ qore/
   have NO registered implementation — let the default raise TypeError.
 
 ### Config
+
 - Every class that needs a filesystem path or tuning parameter must
   expose a @classmethod from_config(cls, config: QoreConfig) constructor.
 - Never accept root: Path or similar as a plain argument in __init__.
@@ -92,6 +95,7 @@ ai-refs:
 ```
 
 Run once before starting `qore-data` implementation:
+
 ```bash
 just ai-refs
 # Then read .ai/refs/akshare/ before writing any fetcher
@@ -764,6 +768,7 @@ runner. Keeping them together in `qore-intelligence` makes the combination
 point (`SignalCombiner`) natural and avoids a dependency cycle.
 
 **Deps**:
+
 ```toml
 [project]
 dependencies = [
@@ -779,7 +784,8 @@ regime = ["hmmlearn>=0.3"]
 ```
 
 **Internal layout**:
-```
+
+```text
 qore-intelligence/src/qore_intelligence/
 ├── model/
 │   ├── normalizer.py      ← XNormalizer, YTransformer protocols + impls
@@ -1291,7 +1297,7 @@ def compute_metrics(
 
 ## 10. Where to Start
 
-```
+```text
 just ai-refs                    # clone .ai/refs/akshare/ first
 
 crates/qore-core/src/qore_core/instrument.py   # sealed union + TradingSession
@@ -1302,6 +1308,7 @@ crates/qore-data/src/qore_data/fetch.py        # singledispatch fetch functions
 ```
 
 Verify before proceeding:
+
 - `fetch_minute(StockInstrument(...), ...)` raises `TypeError`
 - `fetch_daily(FundInstrument(...), ...)` calls `source.fund_nav()` correctly
 - `ModelPipeline.load("stock_ranker", config)` derives path entirely from config

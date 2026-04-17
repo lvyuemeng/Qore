@@ -28,6 +28,13 @@ class StockSource(Protocol):
         as_of: date,
     ) -> list[StockInstrument]: ...
 
+    async def announcements(
+        self,
+        inst: StockInstrument,
+        start: date,
+        end: date,
+    ) -> pl.DataFrame: ...
+
 
 class FundSource(Protocol):
     async def fund_nav(

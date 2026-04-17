@@ -9,7 +9,7 @@ the rewrite.
 
 | Legacy path | Rewrite action | Target |
 | --- | --- | --- |
-| `src/quant_trade/transform.py` | selectively extract helpers | `crates/qore-core/src/qore_core/` |
+| `src/quant_trade/transform.py` | retire | none |
 | `src/quant_trade/client/eastmoney.py` | reverse engineer and rewrite | `crates/qore-data/src/qore_data/fetcher/eastmoney.py` |
 | `src/quant_trade/provider/akshare.py` | do not port directly | reference only via `.ai/refs/akshare/` |
 | `src/quant_trade/provider/baostock.py` | optional later adapter | `crates/qore-data/` |

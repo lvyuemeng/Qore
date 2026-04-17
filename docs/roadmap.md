@@ -132,7 +132,7 @@ Status key:
 
 Current note:
 
-- `qore-data` now validates read filters, deduplicates repeated parquet writes, and covers fund holdings plus analyst forecast data alongside daily/nav/fundamental EastMoney paths; store ergonomics and broader endpoint coverage remain in progress.
+- `qore-data` now validates read filters, deduplicates repeated parquet writes, and covers fund holdings, analyst forecast data, and stock announcements alongside daily/nav/fundamental EastMoney paths; store ergonomics and broader endpoint coverage remain in progress.
 
 ### Phase 4 checklist
 
@@ -144,7 +144,7 @@ Current note:
 
 Current note:
 
-- `qore-factor` now computes factors lazily, supports normalization and neutralization, evaluates cross-sectional IC/ICIR, persists standardized outputs into `factor_scores`, and includes reusable realized-volatility signals for downstream sizing; broader factor families and end-to-end store-driven orchestration still need expansion.
+- `qore-factor` now computes factors lazily, supports normalization and neutralization, evaluates cross-sectional IC/ICIR, persists standardized outputs into `factor_scores`, and includes realized-volatility plus legacy-inspired fundamental quality, cashflow, and growth formulas extracted as design-aligned factors rather than direct class ports.
 
 ### Phase 5 checklist
 
@@ -157,7 +157,7 @@ Current note:
 
 Current note:
 
-- `qore-intelligence` now has config-derived normalizers, a baseline multi-horizon ranking model, a persisted `ModelPipeline`, and a news pipeline that scores and writes article-derived `news_scores`; walk-forward training and deeper signal coverage still need to be hardened.
+- `qore-intelligence` now has config-derived normalizers, a baseline multi-horizon ranking model, a persisted `ModelPipeline`, a news pipeline that scores and writes article-derived `news_scores`, and purged validation primitives that now feed recorded validation ICs during fitting.
 
 ### Phase 6 checklist
 
@@ -251,8 +251,7 @@ Scope:
 
 Migration notes:
 
-- Reuse only low-level date/code normalization ideas from `src/quant_trade/transform.py`
-- Do not carry over current storage or provider abstractions
+- Do not carry over current helper, storage, or provider abstractions from `src/quant_trade`
 
 Exit criteria:
 
@@ -414,7 +413,7 @@ Exit criteria:
 
 | Legacy area | Status | Target home |
 | --- | --- | --- |
-| `src/quant_trade/transform.py` | selective reuse | `qore-core` helpers |
+| `src/quant_trade/transform.py` | retire | none |
 | `src/quant_trade/client/eastmoney.py` | reverse engineer and rewrite | `qore-data/fetcher/eastmoney.py` |
 | `src/quant_trade/provider/akshare.py` | do not port directly | reference only via `.ai/refs/akshare/` |
 | `src/quant_trade/provider/baostock.py` | optional future reference | possible future source adapter |

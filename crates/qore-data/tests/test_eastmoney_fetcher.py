@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from qore_core import FundInstrument, StockInstrument
+from qore_data.fetch import fetch_announcements
 from qore_data.fetcher.eastmoney import EastMoneyFetcher
 
 
@@ -202,3 +203,70 @@ async def test_analyst_forecast_parses_profit_prediction_payload() -> None:
     assert result.get_column("overweight").to_list() == [4]
     assert result.get_column("eps_year1").to_list() == [3.21]
     assert result.get_column("eps_year4").to_list() == [4.12]
+
+
+@pytest.mark.asyncio
+async def test_announcements_parse_notice_payload() -> None:
+    fetcher = StubEastMoneyFetcher(
+        [
+            {
+                "data": {
+                    "total_hits": 1,
+                    "list": [
+                        {
+                            "art_code": "AN202604171234567890",
+                            "notice_date": "2026-04-17",
+                            "title": "2025年年度报告",
+                            "columns": [{"column_name": "财务报告"}],
+                            "codes": [
+                                {
+                                    "stock_code": "600519",
+                                    "short_name": "贵州茅台",
+                                    "ann_type": "A",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        ]
+    )
+    inst = StockInstrument(symbol="600519.SH", exchange="SH", industry="food")
+    result = await fetcher.announcements(inst, date(2026, 4, 1), date(2026, 4, 30))
+
+    assert result.get_column("symbol").to_list() == ["600519.SH"]
+    assert result.get_column("notice_type").to_list() == ["财务报告"]
+    assert result.get_column("title").to_list() == ["2025年年度报告"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_announcements_dispatches_for_stock() -> None:
+    fetcher = StubEastMoneyFetcher(
+        [
+            {
+                "data": {
+                    "total_hits": 1,
+                    "list": [
+                        {
+                            "art_code": "AN202604171234567890",
+                            "notice_date": "2026-04-17",
+                            "title": "2025年年度报告",
+                            "columns": [{"column_name": "财务报告"}],
+                            "codes": [
+                                {
+                                    "stock_code": "600519",
+                                    "short_name": "贵州茅台",
+                                    "ann_type": "A",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            }
+        ]
+    )
+    inst = StockInstrument(symbol="600519.SH", exchange="SH", industry="food")
+    result = await fetch_announcements(
+        inst, date(2026, 4, 1), date(2026, 4, 30), fetcher
+    )
+    assert result.height == 1

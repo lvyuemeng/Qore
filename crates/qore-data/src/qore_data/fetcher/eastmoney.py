@@ -19,7 +19,7 @@ class EastMoneyFetcher:
     _CONSTITUENT_URL = "https://push2.eastmoney.com/api/qt/clist/get"
     _FINANCIAL_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     _ANALYST_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-    _ANNOUNCE_URL = "https://np-anotice.eastmoney.com/anlist/gglist.aspx"
+    _ANNOUNCE_URL = "https://np-anotice-stock.eastmoney.com/api/security/ann"
     _FINANCIAL_PAGE_SIZE = 500
     _FUND_HOLDINGS_PAGE_SIZE = 500
     _ANALYST_PAGE_SIZE = 500
@@ -72,6 +72,15 @@ class EastMoneyFetcher:
             "eps_year2": pl.Float64,
             "eps_year3": pl.Float64,
             "eps_year4": pl.Float64,
+        },
+        "announcements": {
+            "symbol": pl.String,
+            "short_name": pl.String,
+            "title": pl.String,
+            "notice_type": pl.String,
+            "notice_date": pl.Date,
+            "art_code": pl.String,
+            "url": pl.String,
         },
     }
 
@@ -353,6 +362,60 @@ class EastMoneyFetcher:
         }
         return pl.DataFrame([row]).select(self._empty_frame("analyst_forecast").columns)
 
+    async def announcements(
+        self,
+        inst: StockInstrument,
+        start: date,
+        end: date,
+    ) -> pl.DataFrame:
+        pages = await self._fetch_paginated_json(
+            self._ANNOUNCE_URL,
+            build_params=lambda page: self._announcement_params(
+                inst, start, end, page_index=page
+            ),
+            total_count=lambda payload: int(
+                ((payload.get("data") or {}).get("total_hits")) or 0
+            ),
+            page_size=100,
+            referer=f"https://data.eastmoney.com/notices/stock/{self._symbol_digits(inst.symbol)}.html",
+        )
+        rows: list[dict[str, Any]] = []
+        for page in pages:
+            records = ((page.get("data") or {}).get("list")) or []
+            for item in records:
+                codes = item.get("codes") or []
+                matched = next(
+                    (
+                        code
+                        for code in codes
+                        if str(code.get("stock_code", "")).zfill(6)
+                        == self._symbol_digits(inst.symbol)
+                    ),
+                    None,
+                )
+                if matched is None:
+                    continue
+                notice_date = self._parse_date(item.get("notice_date"))
+                if notice_date is None or notice_date < start or notice_date > end:
+                    continue
+                columns = item.get("columns") or []
+                first_column = columns[0] if columns else {}
+                art_code = str(item.get("art_code") or "")
+                rows.append(
+                    {
+                        "symbol": inst.symbol,
+                        "short_name": str(matched.get("short_name") or ""),
+                        "title": str(item.get("title") or ""),
+                        "notice_type": str(first_column.get("column_name") or ""),
+                        "notice_date": notice_date,
+                        "art_code": art_code,
+                        "url": f"https://data.eastmoney.com/notices/detail/{self._symbol_digits(inst.symbol)}/{art_code}.html",
+                    }
+                )
+        if not rows:
+            return self._empty_frame("announcements")
+        return pl.DataFrame(rows).select(self._empty_frame("announcements").columns)
+
     async def _request_json(
         self,
         url: str,
@@ -532,6 +595,27 @@ class EastMoneyFetcher:
             "pageNo": "1",
             "pageNum": "1",
             "filter": f'(SECURITY_CODE="{self._symbol_digits(inst.symbol)}")',
+        }
+
+    def _announcement_params(
+        self,
+        inst: StockInstrument,
+        start: date,
+        end: date,
+        *,
+        page_index: int,
+    ) -> dict[str, Any]:
+        return {
+            "sr": "-1",
+            "page_size": "100",
+            "page_index": str(page_index),
+            "ann_type": "A",
+            "client_source": "web",
+            "f_node": "0",
+            "s_node": "0",
+            "stock_list": self._symbol_digits(inst.symbol),
+            "begin_time": start.isoformat(),
+            "end_time": end.isoformat(),
         }
 
     def _match_security_code(

@@ -118,3 +118,24 @@ async def _fetch_stock_fundamentals(
     source: StockSource,
 ) -> pl.DataFrame:
     return await source.fundamentals(inst, fields, as_of)
+
+
+@singledispatch
+async def fetch_announcements(
+    inst: Instrument,
+    start: date,
+    end: date,
+    source: object,
+) -> pl.DataFrame:
+    del start, end, source
+    raise TypeError(f"Announcements not available for {type(inst).__name__}.")
+
+
+@fetch_announcements.register(StockInstrument)
+async def _fetch_stock_announcements(
+    inst: StockInstrument,
+    start: date,
+    end: date,
+    source: StockSource,
+) -> pl.DataFrame:
+    return await source.announcements(inst, start, end)

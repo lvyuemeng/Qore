@@ -7,6 +7,17 @@ import polars as pl
 import pytest
 from qore_core import QoreConfig
 from qore_data.store.duckdb import QoreStore
+from qore_factor.fundamental.growth import (
+    NetProfitGrowthFactor,
+    ProfitGrowthPremiumFactor,
+    RevenueGrowthFactor,
+)
+from qore_factor.fundamental.quality import (
+    AccrualRatioFactor,
+    AssetTurnoverFactor,
+    CFOYieldFactor,
+    GrossMarginFactor,
+)
 from qore_factor.fundamental.value import BookToPriceFactor
 from qore_factor.ohlcv.momentum import MomentumFactor
 from qore_factor.ohlcv.volatility import RealizedVolatilityFactor
@@ -80,6 +91,85 @@ def test_pipeline_adds_realized_volatility_factor() -> None:
     assert "realized_vol_2d" in result.columns
     assert result.get_column("realized_vol_2d").null_count() > 0
     assert result.get_column("realized_vol_2d").drop_nulls().len() > 0
+
+
+def test_pipeline_adds_fundamental_quality_factors() -> None:
+    lf = pl.DataFrame(
+        {
+            "date": [date(2026, 3, 31), date(2026, 3, 31)],
+            "symbol": ["AAA", "BBB"],
+            "revenue": [100.0, 200.0],
+            "gross_margin": [0.35, 0.20],
+            "total_assets": [400.0, 500.0],
+        }
+    ).lazy()
+
+    result = (
+        FactorPipeline()
+        .add(GrossMarginFactor(), AssetTurnoverFactor())
+        .run(lf)
+        .collect()
+        .sort("symbol")
+    )
+
+    assert result.get_column("gross_margin").to_list() == [0.35, 0.20]
+    assert result.get_column("asset_turnover").to_list() == pytest.approx([0.25, 0.4])
+
+
+def test_pipeline_adds_fundamental_cashflow_factors() -> None:
+    lf = pl.DataFrame(
+        {
+            "date": [date(2026, 3, 31), date(2026, 3, 31)],
+            "symbol": ["AAA", "BBB"],
+            "cfo": [80.0, 60.0],
+            "net_income": [100.0, 50.0],
+            "total_assets": [400.0, 200.0],
+        }
+    ).lazy()
+
+    result = (
+        FactorPipeline()
+        .add(CFOYieldFactor(), AccrualRatioFactor())
+        .run(lf)
+        .collect()
+        .sort("symbol")
+    )
+
+    assert result.get_column("cfo_yield").to_list() == pytest.approx([0.2, 0.3])
+    assert result.get_column("accrual_ratio").to_list() == pytest.approx([0.05, -0.05])
+
+
+def test_pipeline_adds_fundamental_growth_factors() -> None:
+    lf = pl.DataFrame(
+        {
+            "date": [date(2026, 3, 31), date(2026, 3, 31)],
+            "symbol": ["AAA", "BBB"],
+            "revenue_growth_yoy": [0.10, 0.05],
+            "net_profit_growth_yoy": [0.18, 0.02],
+        }
+    ).lazy()
+
+    result = (
+        FactorPipeline()
+        .add(
+            RevenueGrowthFactor(),
+            NetProfitGrowthFactor(),
+            ProfitGrowthPremiumFactor(),
+        )
+        .run(lf)
+        .collect()
+        .sort("symbol")
+    )
+
+    assert result.get_column("revenue_growth_yoy").to_list() == pytest.approx(
+        [0.10, 0.05]
+    )
+    assert result.get_column("net_profit_growth_yoy").to_list() == pytest.approx(
+        [0.18, 0.02]
+    )
+    assert result.get_column("profit_growth_premium").to_list() == pytest.approx(
+        [0.08, -0.03]
+    )
 
 
 def test_pipeline_evaluates_ic_metrics() -> None:
