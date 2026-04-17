@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import date
 
 import polars as pl
-
 from qore_core.calendar import TradingCalendar
 from qore_core.config import QoreConfig
 from qore_core.universe import Universe
@@ -22,7 +21,7 @@ class RankingStrategy:
     required_columns: frozenset[str] = frozenset()
 
     @classmethod
-    def from_config(cls, config: QoreConfig) -> "RankingStrategy":
+    def from_config(cls, config: QoreConfig) -> RankingStrategy:
         return cls(
             pipeline=ModelPipeline.load("stock_ranker", config),
             combiner=SignalCombiner(news_alpha=0.0),
@@ -31,18 +30,25 @@ class RankingStrategy:
     def generate(
         self,
         lf: pl.LazyFrame,
+        news_scores: dict[str, float] | None,
         universe: Universe,
         date: date,
         calendar: TradingCalendar,
     ) -> pl.Series:
         df = lf.collect()
         scores = self.pipeline.predict_score(df.lazy())
-        mapping = {
-            symbol: score
-            for symbol, score in zip(
-                df.get_column("symbol").to_list(), scores.to_list(), strict=False
+        combined = self.combiner.combine(
+            scores,
+            news_scores or {},
+            symbols=df.get_column("symbol").to_list(),
+        )
+        mapping = dict(
+            zip(
+                df.get_column("symbol").to_list(),
+                combined.to_list(),
+                strict=False,
             )
-        }
+        )
         values = [
             float(mapping.get(symbol, float("nan")))
             if universe.get(symbol)

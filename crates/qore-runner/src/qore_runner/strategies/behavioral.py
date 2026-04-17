@@ -39,11 +39,12 @@ class BehavioralGatedStrategy:
     def generate(
         self,
         lf: pl.LazyFrame,
+        news_scores: dict[str, float] | None,
         universe: Universe,
         date: date,
         calendar: TradingCalendar,
     ) -> pl.Series:
-        base_signal = self.base.generate(lf, universe, date, calendar)
+        base_signal = self.base.generate(lf, news_scores, universe, date, calendar)
         df = lf.collect()
         regime_scale = self._regime_scale(lf, date)
         vol_scale = self._vol_scale(df)

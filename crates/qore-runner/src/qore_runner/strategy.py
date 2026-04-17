@@ -4,7 +4,6 @@ from datetime import date
 from typing import Literal, Protocol, runtime_checkable
 
 import polars as pl
-
 from qore_core.calendar import TradingCalendar
 from qore_core.instrument import TradingSession
 from qore_core.universe import Universe
@@ -20,6 +19,7 @@ class Strategy(Protocol):
     def generate(
         self,
         lf: pl.LazyFrame,
+        news_scores: dict[str, float] | None,
         universe: Universe,
         date: date,
         calendar: TradingCalendar,

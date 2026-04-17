@@ -9,6 +9,7 @@ from qore_core import QoreConfig
 from qore_data.store.duckdb import QoreStore
 from qore_factor.fundamental.value import BookToPriceFactor
 from qore_factor.ohlcv.momentum import MomentumFactor
+from qore_factor.ohlcv.volatility import RealizedVolatilityFactor
 from qore_factor.pipeline import FactorPipeline
 
 
@@ -54,6 +55,31 @@ def test_pipeline_normalizes_cross_sectionally() -> None:
     result = pipeline.run(lf).collect()
 
     assert "bp_z" in result.columns
+
+
+def test_pipeline_adds_realized_volatility_factor() -> None:
+    lf = pl.DataFrame(
+        {
+            "date": [
+                date(2026, 1, 1),
+                date(2026, 1, 2),
+                date(2026, 1, 3),
+                date(2026, 1, 4),
+                date(2026, 1, 1),
+                date(2026, 1, 2),
+                date(2026, 1, 3),
+                date(2026, 1, 4),
+            ],
+            "symbol": ["AAA", "AAA", "AAA", "AAA", "BBB", "BBB", "BBB", "BBB"],
+            "close": [10.0, 10.2, 10.1, 10.4, 20.0, 19.9, 20.2, 20.5],
+        }
+    ).lazy()
+
+    result = FactorPipeline().add(RealizedVolatilityFactor(window=2)).run(lf).collect()
+
+    assert "realized_vol_2d" in result.columns
+    assert result.get_column("realized_vol_2d").null_count() > 0
+    assert result.get_column("realized_vol_2d").drop_nulls().len() > 0
 
 
 def test_pipeline_evaluates_ic_metrics() -> None:

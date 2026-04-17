@@ -132,7 +132,7 @@ Status key:
 
 Current note:
 
-- `qore-data` now validates read filters, deduplicates repeated parquet writes, and covers fund holdings alongside daily/nav/fundamental EastMoney paths; store ergonomics and broader endpoint coverage remain in progress.
+- `qore-data` now validates read filters, deduplicates repeated parquet writes, and covers fund holdings plus analyst forecast data alongside daily/nav/fundamental EastMoney paths; store ergonomics and broader endpoint coverage remain in progress.
 
 ### Phase 4 checklist
 
@@ -144,7 +144,7 @@ Current note:
 
 Current note:
 
-- `qore-factor` now computes factors lazily, supports normalization and neutralization, evaluates cross-sectional IC/ICIR, and persists standardized outputs into `factor_scores`; broader factor families and end-to-end store-driven orchestration still need expansion.
+- `qore-factor` now computes factors lazily, supports normalization and neutralization, evaluates cross-sectional IC/ICIR, persists standardized outputs into `factor_scores`, and includes reusable realized-volatility signals for downstream sizing; broader factor families and end-to-end store-driven orchestration still need expansion.
 
 ### Phase 5 checklist
 
@@ -157,7 +157,7 @@ Current note:
 
 Current note:
 
-- `qore-intelligence` now has config-derived normalizers, a baseline multi-horizon ranking model, and a persisted `ModelPipeline`; walk-forward training and store-backed target construction still need to be hardened.
+- `qore-intelligence` now has config-derived normalizers, a baseline multi-horizon ranking model, a persisted `ModelPipeline`, and a news pipeline that scores and writes article-derived `news_scores`; walk-forward training and deeper signal coverage still need to be hardened.
 
 ### Phase 6 checklist
 
@@ -170,7 +170,7 @@ Current note:
 
 Current note:
 
-- `qore-runner` now includes a regime-aware behavioral gating wrapper on top of the existing strategy, sizer, and risk flow, but news-aware ranking integration and richer sizing remain in progress.
+- `qore-runner` now threads `news_scores` through strategy generation, blends them in the ranking path, and includes an inverse-volatility sizer with capped renormalization; broader end-to-end portfolio construction still remains in progress.
 
 ### Phase 7 checklist
 

@@ -165,3 +165,40 @@ async def test_fundamentals_parse_value_analysis_payload() -> None:
     assert result.get_column("roe").to_list() == [0.15]
     assert result.get_column("gross_margin").to_list() == [0.375]
     assert result.get_column("total_assets").to_list() == [1000.0]
+
+
+@pytest.mark.asyncio
+async def test_analyst_forecast_parses_profit_prediction_payload() -> None:
+    fetcher = StubEastMoneyFetcher(
+        [
+            {
+                "result": {
+                    "data": [
+                        {
+                            "SECURITY_CODE": "600519",
+                            "RATING_ORG_NUM": "12",
+                            "BUY": "5",
+                            "HOLD": "4",
+                            "NEUTRAL": "2",
+                            "SELL": "1",
+                            "STRONG_SELL": "0",
+                            "EPS1": "3.21",
+                            "EPS2": "3.55",
+                            "EPS3": "3.88",
+                            "EPS4": "4.12",
+                        }
+                    ]
+                }
+            }
+        ]
+    )
+    result = await fetcher.analyst_forecast(
+        StockInstrument(symbol="600519.SH", exchange="SH", industry="food")
+    )
+
+    assert result.get_column("symbol").to_list() == ["600519.SH"]
+    assert result.get_column("report_count").to_list() == [12]
+    assert result.get_column("buy").to_list() == [5]
+    assert result.get_column("overweight").to_list() == [4]
+    assert result.get_column("eps_year1").to_list() == [3.21]
+    assert result.get_column("eps_year4").to_list() == [4.12]

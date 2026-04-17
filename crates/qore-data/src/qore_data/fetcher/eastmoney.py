@@ -22,6 +22,7 @@ class EastMoneyFetcher:
     _ANNOUNCE_URL = "https://np-anotice.eastmoney.com/anlist/gglist.aspx"
     _FINANCIAL_PAGE_SIZE = 500
     _FUND_HOLDINGS_PAGE_SIZE = 500
+    _ANALYST_PAGE_SIZE = 500
     _FINANCIAL_REPORTS = {
         "balance": "RPT_DMSK_FN_BALANCE",
         "income": "RPT_DMSK_FN_INCOME",
@@ -58,6 +59,19 @@ class EastMoneyFetcher:
             "market_value": pl.Float64,
             "total_share_ratio": pl.Float64,
             "float_share_ratio": pl.Float64,
+        },
+        "analyst_forecast": {
+            "symbol": pl.String,
+            "report_count": pl.Int64,
+            "buy": pl.Int64,
+            "overweight": pl.Int64,
+            "neutral": pl.Int64,
+            "underweight": pl.Int64,
+            "sell": pl.Int64,
+            "eps_year1": pl.Float64,
+            "eps_year2": pl.Float64,
+            "eps_year3": pl.Float64,
+            "eps_year4": pl.Float64,
         },
     }
 
@@ -312,6 +326,33 @@ class EastMoneyFetcher:
             return self._empty_frame("fund_holdings")
         return pl.DataFrame(rows).select(self._empty_frame("fund_holdings").columns)
 
+    async def analyst_forecast(self, inst: StockInstrument) -> pl.DataFrame:
+        payload = await self._request_json(
+            self._ANALYST_URL,
+            params=self._analyst_forecast_params(inst),
+            referer="https://data.eastmoney.com/report/profitforecast.jshtml",
+        )
+        records = ((payload.get("result") or {}).get("data")) or []
+        matched = self._match_security_code(records, inst.symbol)
+        if not matched:
+            return self._empty_frame("analyst_forecast")
+
+        year_columns = [self._to_float(matched.get(f"EPS{i}")) for i in range(1, 5)]
+        row = {
+            "symbol": inst.symbol,
+            "report_count": self._to_int(matched.get("RATING_ORG_NUM")),
+            "buy": self._to_int(matched.get("BUY")),
+            "overweight": self._to_int(matched.get("HOLD")),
+            "neutral": self._to_int(matched.get("NEUTRAL")),
+            "underweight": self._to_int(matched.get("SELL")),
+            "sell": self._to_int(matched.get("STRONG_SELL")),
+            "eps_year1": year_columns[0],
+            "eps_year2": year_columns[1],
+            "eps_year3": year_columns[2],
+            "eps_year4": year_columns[3],
+        }
+        return pl.DataFrame([row]).select(self._empty_frame("analyst_forecast").columns)
+
     async def _request_json(
         self,
         url: str,
@@ -478,6 +519,20 @@ class EastMoneyFetcher:
             '(TRADE_MARKET_CODE!="069001017")'
             f'(REPORT_DATE="{report_date.isoformat()}")'
         )
+
+    def _analyst_forecast_params(self, inst: StockInstrument) -> dict[str, Any]:
+        return {
+            "reportName": "RPT_WEB_RESPREDICT",
+            "columns": "WEB_RESPREDICT",
+            "pageNumber": "1",
+            "pageSize": str(self._ANALYST_PAGE_SIZE),
+            "sortTypes": "-1",
+            "sortColumns": "RATING_ORG_NUM",
+            "p": "1",
+            "pageNo": "1",
+            "pageNum": "1",
+            "filter": f'(SECURITY_CODE="{self._symbol_digits(inst.symbol)}")',
+        }
 
     def _match_security_code(
         self,

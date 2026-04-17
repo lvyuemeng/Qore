@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from datetime import date
 
 import polars as pl
-
 from qore_core.calendar import TradingCalendar
 from qore_core.config import QoreConfig
 from qore_core.universe import Universe
+
 from qore_runner.risk import RiskManager
 from qore_runner.sizer import PositionSizer
 from qore_runner.strategy import Strategy
@@ -33,7 +33,7 @@ class StrategyRunner:
         config: QoreConfig,
         strategy: Strategy,
         sizer: PositionSizer,
-    ) -> "StrategyRunner":
+    ) -> StrategyRunner:
         return cls(
             strategy=strategy,
             sizer=sizer,
@@ -50,8 +50,13 @@ class StrategyRunner:
         nav: pl.Series,
         calendar: TradingCalendar,
     ) -> TargetPortfolio:
-        del news_scores
-        signals = self.strategy.generate(factor_lf, universe, date, calendar)
+        signals = self.strategy.generate(
+            factor_lf,
+            news_scores,
+            universe,
+            date,
+            calendar,
+        )
         target = self.sizer.size(signals, universe)
         adjusted = self.risk_manager.apply(target, current_weights, nav)
         return TargetPortfolio(
