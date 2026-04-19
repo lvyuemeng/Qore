@@ -4,24 +4,23 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import polars as pl
-from qore_core.config import QoreConfig
 
 
 @dataclass(slots=True)
 class MultiHorizonRanker:
-    horizons: list[int]
-    weights: dict[str, float]
-    lgbm_params: dict[str, object]
+    horizons: list[int] = field(default_factory=lambda: [20, 60, 252])
+    weights: dict[str, float] = field(default_factory=dict)
+    model_params: dict[str, object] = field(default_factory=dict)
     feature_columns: list[str] = field(default_factory=list)
     _coefs: dict[int, np.ndarray] = field(default_factory=dict)
 
-    @classmethod
-    def from_config(cls, config: QoreConfig) -> MultiHorizonRanker:
-        return cls(
-            horizons=config.intelligence.horizons,
-            weights=config.intelligence.ensemble_weights,
-            lgbm_params=config.intelligence.lgbm.model_dump(),
-        )
+    def __post_init__(self) -> None:
+        if not self.horizons:
+            msg = "MultiHorizonRanker requires at least one horizon."
+            raise ValueError(msg)
+        if not self.weights:
+            equal_weight = 1.0 / len(self.horizons)
+            self.weights = {f"{horizon}d": equal_weight for horizon in self.horizons}
 
     def fit(
         self,

@@ -8,7 +8,7 @@ This repository is the `Qore` rewrite workspace.
 - Keep the stack aligned with the design: Python 3.13, uv workspace, Polars lazy pipelines, DuckDB + Parquet, strict typing.
 - Never import `akshare` in crate runtime code; use `.ai/refs/akshare/` only for endpoint reverse engineering.
 - Use `singledispatch` for instrument-specific behavior; do not add `isinstance` routing.
-- Every class needing paths or tuning parameters must expose `from_config(config: QoreConfig)`.
+- Every class needing paths or runtime parameters must expose `from_config(config: QoreConfig)`.
 
 ## Workspace Basics
 

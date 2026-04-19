@@ -4,14 +4,14 @@ from dataclasses import dataclass
 from datetime import date
 
 import polars as pl
-
 from qore_core.calendar import TradingCalendar
 from qore_core.config import BacktestConfig, QoreConfig
 from qore_core.instrument import FundInstrument, Instrument
 from qore_core.universe import Universe
 from qore_data.store.duckdb import QoreStore
-from qore_backtest.simulate import Fill, fill_order
 from qore_runner.runner import StrategyRunner
+
+from qore_backtest.simulate import Fill, fill_order
 
 
 @dataclass(slots=True)
@@ -38,7 +38,7 @@ class BacktestEngine:
         runner: StrategyRunner,
         store: QoreStore,
         calendar: TradingCalendar,
-    ) -> "BacktestEngine":
+    ) -> BacktestEngine:
         return cls(
             runner=runner,
             store=store,
@@ -59,12 +59,13 @@ class BacktestEngine:
 
         for trading_day in trading_days:
             factor_lf = self._factor_frame_for_day(trading_day)
+            news_scores = self._news_scores_for_day(trading_day)
             nav_series = pl.Series(
                 "nav", [row["nav"] for row in nav_rows] or [nav_value]
             )
             target = self.runner.step(
                 factor_lf=factor_lf,
-                news_scores=None,
+                news_scores=news_scores,
                 universe=universe,
                 date=trading_day,
                 current_weights=current_weights,
@@ -109,6 +110,20 @@ class BacktestEngine:
             return pl.DataFrame({"symbol": []}, schema={"symbol": pl.String}).lazy()
         pivot = frame.pivot(on="factor_name", index="symbol", values="z_score")
         return pivot.lazy()
+
+    def _news_scores_for_day(self, trading_day: date) -> dict[str, float]:
+        news = self.store.read("news_scores", filters={"date": trading_day}).collect()
+        if news.is_empty():
+            return {}
+        return {
+            str(symbol): float(score)
+            for symbol, score in zip(
+                news.get_column("symbol").to_list(),
+                news.get_column("score").to_list(),
+                strict=False,
+            )
+            if score is not None
+        }
 
     def _portfolio_return(
         self,

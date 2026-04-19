@@ -9,6 +9,7 @@ from qore_core.config import QoreConfig
 from qore_core.universe import Universe
 from qore_intelligence.combine import SignalCombiner
 from qore_intelligence.model.pipeline import ModelPipeline
+from qore_intelligence.model.registry import ModelRegistry
 
 
 @dataclass(slots=True)
@@ -22,8 +23,9 @@ class RankingStrategy:
 
     @classmethod
     def from_config(cls, config: QoreConfig) -> RankingStrategy:
+        artifact = ModelRegistry.from_config(config).load("stock_ranker")
         return cls(
-            pipeline=ModelPipeline.load("stock_ranker", config),
+            pipeline=ModelPipeline.from_artifact(artifact),
             combiner=SignalCombiner(news_alpha=0.0),
         )
 

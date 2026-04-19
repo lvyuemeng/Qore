@@ -37,6 +37,8 @@ qore/
 │   ├── factor/
 │   ├── signal/
 │   └── qore.duckdb
+├── examples/
+│   └── stock_ranking_workflow.py
 ├── models/
 ├── Justfile
 └── pyproject.toml         ← [tool.uv.workspace] members = ["crates/*"]
@@ -69,7 +71,7 @@ qore/
 
 ### Config
 
-- Every class that needs a filesystem path or tuning parameter must
+- Every class that needs a filesystem path or runtime parameter must
   expose a @classmethod from_config(cls, config: QoreConfig) constructor.
 - Never accept root: Path or similar as a plain argument in __init__.
 ```
@@ -100,6 +102,19 @@ Run once before starting `qore-data` implementation:
 just ai-refs
 # Then read .ai/refs/akshare/ before writing any fetcher
 ```
+
+### 1.3 Examples are outside crates
+
+Examples, demos, and reference workflows belong under `examples/`, not inside crate
+packages. Crates should expose reusable building blocks; examples should compose those
+building blocks into runnable workflows.
+
+Example responsibilities:
+
+- pre-given stock selection strategy examples
+- end-to-end backtest examples using crate APIs
+- category or basket evaluation examples that acquire more information before ranking
+- operator-reference scripts that show the intended flow without becoming crate runtime API
 
 ---
 
@@ -159,7 +174,7 @@ three concrete arms. `getattr` fallbacks and `isinstance` chains are banned.
 
 ---
 
-### 2.2 Config: single source of truth, all paths live here
+### 2.2 Config: infrastructure and runtime source of truth
 
 ```python
 # qore_core/config.py
@@ -173,40 +188,14 @@ class DataConfig(BaseModel):
     eastmoney_delay_min: float = 0.2
     eastmoney_delay_max: float = 0.5
 
-class LGBMParams(BaseModel):
-    objective: str = "lambdarank"
-    metric: str = "ndcg"
-    ndcg_eval_at: list[int] = [5, 10, 20]
-    num_leaves: int = 31
-    learning_rate: float = 0.05
-    feature_fraction: float = 0.8
-    bagging_fraction: float = 0.8
-    bagging_freq: int = 5
-    min_child_samples: int = 20
-    lambda_l1: float = 0.1
-    lambda_l2: float = 0.1
-    verbose: int = -1
-    seed: int = 42
-
 class IntelligenceConfig(BaseModel):
-    """Config for both ML ranking and news signal (merged crate)."""
+    """Infrastructure config for intelligence runtime, not trained model state."""
     model_store_root: str = "models"
-    # Ranking model
-    horizons: list[int] = [20, 60, 252]
-    ensemble_weights: dict[str, float] = {"20d": 0.3, "60d": 0.4, "252d": 0.3}
-    lgbm: LGBMParams = Field(default_factory=LGBMParams)
     # News signal
     news_llm_daily_budget: int = 50
     news_llm_model: str = "claude-sonnet-4-20250514"
     news_finbert_model: str = "IDEA-CCNL/Erlangshen-Roberta-110M-Sentiment"
     news_score_half_life_days: int = 5
-
-    @model_validator(mode="after")
-    def _weights_sum_one(self) -> "IntelligenceConfig":
-        s = sum(self.ensemble_weights.values())
-        if abs(s - 1.0) > 1e-6:
-            raise ValueError(f"ensemble_weights must sum to 1.0, got {s:.4f}")
-        return self
 
 class StockRunnerConfig(BaseModel):
     rebalance_freq: Literal["D", "W", "M"] = "W"
@@ -243,9 +232,13 @@ class QoreConfig(BaseModel):
         return cls.model_validate(yaml.safe_load(Path(path).read_text()))
 ```
 
-**Rule**: every class that needs a path or tuning parameter must expose
+**Rule**: every class that needs a path or runtime parameter must expose
 `@classmethod from_config(cls, config: QoreConfig)`. Never accept bare
 `Path` arguments in `__init__`.
+
+**Boundary**: config is for infrastructure and runtime behavior. Tuned model
+hyperparameters, selected factor schema, learned ensemble weights, and training
+metadata belong to exported model artifacts, not `QoreConfig`.
 
 ---
 
@@ -333,6 +326,11 @@ class StockSource(Protocol):
     async def index_constituents(
         self, index_symbol: str, as_of: date
     ) -> list[StockInstrument]: ...
+
+    async def stock_profile(
+        self, inst: StockInstrument, as_of: date
+    ) -> pl.DataFrame:
+        """Universe metadata snapshot for a single stock."""
 
 class FundSource(Protocol):
     """Provides fund NAV and holdings data only."""
@@ -569,6 +567,22 @@ DATASETS: dict[str, Dataset] = {
         partition_cols=["year", "symbol"],
         dedup_keys=["announce_date", "symbol", "report_date"],
     ),
+    "stock_profiles": Dataset(
+        name="stock_profiles",
+        schema=pa.schema([
+            ("as_of", pa.date32()), ("symbol", pa.string()),
+            ("short_name", pa.string()), ("exchange", pa.string()),
+            ("industry", pa.string()), ("board", pa.string()),
+            ("listing_date", pa.date32()),
+            ("total_market_cap", pa.float64()),
+            ("float_market_cap", pa.float64()),
+            ("total_shares", pa.float64()),
+            ("float_shares", pa.float64()),
+            ("is_st", pa.bool_()),
+        ]),
+        partition_cols=["symbol"],
+        dedup_keys=["as_of", "symbol"],
+    ),
     "factor_scores": Dataset(
         name="factor_scores",
         schema=pa.schema([
@@ -621,6 +635,24 @@ class QoreStore:
     def sql(self, query: str) -> pl.LazyFrame:
         """Escape hatch for analytical SQL (factor window computation, etc.)"""
 ```
+
+### 3.5 Stock-universe-specific information still needed
+
+For credible A-share workflows, data coverage is not just OHLCV plus point-in-time
+fundamentals. The stock universe layer still needs richer metadata and membership views.
+Reference `.ai/refs/akshare/` first when adding them.
+
+Priority stock-universe information to support:
+
+- historical index constituents for benchmark and pool definitions
+- stable industry classification mapping for neutralization and group evaluation
+- ST, suspension, delisting-risk, and price-limit-relevant status flags
+- board / listing-segment tags such as main board, ChiNext, STAR, Beijing
+- fund holdings and analyst forecast coverage linked cleanly to stock universes
+- announcement and event coverage that can feed category evaluation or news triage
+
+These are useful both for pre-given stock-selection strategies and for category-level
+evaluation before ranking individual names.
 
 ---
 
@@ -789,10 +821,12 @@ regime = ["hmmlearn>=0.3"]
 qore-intelligence/src/qore_intelligence/
 ├── model/
 │   ├── normalizer.py      ← XNormalizer, YTransformer protocols + impls
-│   ├── lgbm_rank.py       ← MultiHorizonRanker
-│   ├── ensemble.py        ← Optuna weight tuning
+│   ├── lgbm_rank.py       ← ranking model core
+│   ├── artifact.py        ← model export/import data structures
+│   ├── registry.py        ← model loading/saving behavior
+│   ├── ensemble.py        ← Optuna tuning and weight search
 │   ├── regime.py          ← HMM MarketRegimeDetector (Phase 3)
-│   └── pipeline.py        ← ModelPipeline: normalize + fit + save/load
+│   └── pipeline.py        ← fit/predict orchestration only
 ├── signal/
 │   ├── triage.py          ← Layer 1: regex + jieba
 │   ├── sentiment.py       ← Layer 2: FinBERT-Chinese
@@ -832,47 +866,41 @@ class CrossSectionalZScore:
     """
 ```
 
-### 5.2 ModelPipeline: config-driven, versioned
+### 5.2 ModelPipeline: fit/predict orchestration only
 
 ```python
 # qore_intelligence/model/pipeline.py
 class ModelPipeline:
     """
-    Complete ML pipeline: XNormalizer → SignalModel → persisted.
-    Never constructed with bare path arguments — always via from_config().
+    Complete ML pipeline: XNormalizer → SignalModel.
+    It orchestrates fit/predict behavior only.
+    It is not the persisted artifact and it is not the registry.
     """
 
     def __init__(
         self,
-        name: str,                      # "stock_ranker", "fund_screener"
         x_normalizer: XNormalizer,
         y_transformer: YTransformer,
         model: "SignalModel",
-        config: QoreConfig,
     ) -> None:
-        self.name = name
-        self._root = Path(config.intelligence.model_store_root) / name
-        # All path logic is internal — callers never see paths
+        ...
 
     @classmethod
     def from_config(
         cls,
-        name: str,
         config: QoreConfig,
         *,
         x_normalizer: XNormalizer | None = None,
         y_transformer: YTransformer | None = None,
     ) -> "ModelPipeline":
         """
-        Factory. Defaults: RankScaler + CrossSectionalZScore.
-        Creates but does not load — use .load() to restore trained state.
+        Factory for runtime defaults only.
+        Does not resolve persisted model versions.
         """
         return cls(
-            name=name,
             x_normalizer=x_normalizer or RankScaler(),
             y_transformer=y_transformer or CrossSectionalZScore(),
-            model=MultiHorizonRanker.from_config(config),
-            config=config,
+            model=MultiHorizonRanker(),
         )
 
     def fit(
@@ -886,58 +914,62 @@ class ModelPipeline:
         3. x_normalizer.fit(X_train)
         4. y_transformer.fit_transform(y_train, date_groups)
         5. Walk-forward GroupKFold training
-        Records self.trained_on and self.validation_ic.
         """
 
     def predict_score(self, factor_lf: pl.LazyFrame) -> pl.Series:
         """x_normalizer.transform → model.predict → pl.Series(name='score')"""
-
-    def save(self, tag: str | None = None) -> Path:
-        """
-        Saves to: {model_store_root}/{name}/{tag or trained_on.isoformat()}/pipeline.joblib
-        Updates {model_store_root}/{name}/latest symlink.
-        Root path comes from config stored at __init__ time.
-        """
-        version = tag or self.trained_on.isoformat()
-        path = self._root / version / "pipeline.joblib"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self, path)
-        latest = self._root / "latest"
-        latest.unlink(missing_ok=True)
-        latest.symlink_to(self._root / version, target_is_directory=True)
-        return path
-
-    @classmethod
-    def load(cls, name: str, config: QoreConfig, version: str = "latest") -> "ModelPipeline":
-        """
-        Loads from {model_store_root}/{name}/{version}/pipeline.joblib.
-        Path fully derived from config.
-        """
-        root = Path(config.intelligence.model_store_root) / name
-        path = root / version / "pipeline.joblib"
-        return joblib.load(path)
 ```
 
-### 5.3 MultiHorizonRanker
+### 5.3 Model artifact and registry separation
+
+```python
+# qore_intelligence/model/artifact.py
+class ModelArtifact(BaseModel):
+    """Pure persisted data. No loading/saving behavior."""
+
+    model_name: str
+    feature_columns: list[str]
+    horizons: list[int]
+    ensemble_weights: dict[str, float]
+    model_params: dict[str, object]
+    validation_metrics: dict[str, float]
+    training_window: dict[str, str] | None = None
+    trained_at: datetime
+    payload: bytes | str
+
+# qore_intelligence/model/registry.py
+class ModelRegistry:
+    """Loading/saving behavior. Paths come from config."""
+
+    @classmethod
+    def from_config(cls, config: QoreConfig) -> "ModelRegistry": ...
+
+    def save(self, artifact: ModelArtifact, version: str | None = None) -> Path: ...
+    def load(self, model_name: str, version: str = "latest") -> ModelArtifact: ...
+```
+
+Rules:
+
+- `ModelPipeline` owns fit/predict behavior
+- `ModelArtifact` owns persisted data only
+- `ModelRegistry` owns export/import behavior only
+- fields such as `trained_on`, `validation_ic`, and tuned hyperparameters belong in `ModelArtifact`, not `ModelPipeline`
+
+### 5.4 Ranking model core
 
 ```python
 # qore_intelligence/model/lgbm_rank.py
 class MultiHorizonRanker:
-    """LambdaRank per horizon, weighted ensemble."""
-
-    @classmethod
-    def from_config(cls, config: QoreConfig) -> "MultiHorizonRanker":
-        return cls(
-            horizons=config.intelligence.horizons,
-            weights=config.intelligence.ensemble_weights,
-            lgbm_params=config.intelligence.lgbm.model_dump(),
-        )
+    """Ranking model core. Trained settings come from fit or artifact load."""
 
     def predict_score(self, X: pl.DataFrame) -> pl.Series:
         """Weighted sum across horizon models."""
 ```
 
-### 5.4 News pipeline — litellm, layered
+Optuna-generated hyperparameters and selected factor/model settings are packed into
+the saved artifact. They are not declared as static config defaults.
+
+### 5.5 News pipeline — litellm, layered
 
 ```python
 # qore_intelligence/signal/llm.py
@@ -1000,7 +1032,7 @@ class NewsPipeline:
         """Crawl → triage → sentiment → llm → decay → write news_scores."""
 ```
 
-### 5.5 SignalCombiner
+### 5.6 SignalCombiner
 
 ```python
 # qore_intelligence/combine.py
@@ -1071,7 +1103,9 @@ class RankingStrategy:
 
     @classmethod
     def from_config(cls, config: QoreConfig) -> "RankingStrategy":
-        pipeline = ModelPipeline.load("stock_ranker", config)
+        registry = ModelRegistry.from_config(config)
+        artifact = registry.load("stock_ranker")
+        pipeline = ModelPipeline.from_artifact(artifact)
         combiner = SignalCombiner(news_alpha=0.0)
         return cls(pipeline=pipeline, combiner=combiner)
 
@@ -1098,6 +1132,18 @@ class BehavioralGatedStrategy:
         min_scale: float = 0.5,
     ) -> None: ...
 ```
+
+### 6.1.1 Example workflow shape
+
+The first reference stock example under `examples/` should be built from these parts:
+
+1. define a pre-given stock selection universe or basket
+2. acquire more category-level information before name ranking
+3. generate signals from factors and optional model or news layers
+4. construct entries and target holdings through runner components
+5. evaluate the resulting strategy with backtest metrics and diagnostics
+
+This example is a composition layer, not a crate-owned runtime entrypoint.
 
 ### 6.2 PositionSizer, RiskManager, StrategyRunner
 
@@ -1282,10 +1328,12 @@ def compute_metrics(
   `isinstance` chains and `if asset_type ==` conditions are banned everywhere.
 - Unsupported operations (minute data for stocks, fundamentals for funds) have
   **no registered implementation**. Let the dispatch default raise `TypeError`.
-- Every class with a path or parameter dependency exposes
+- Every class with a path or runtime dependency exposes
   `@classmethod from_config(cls, config: QoreConfig)`. No bare `Path` args.
+- Tuned model hyperparameters, factor schema, learned weights, and training
+  summaries are artifact data, not config.
 - Never import `akshare` in any crate. Read `.ai/refs/akshare/` as reference only.
-- `.collect()` is only permitted in `ModelPipeline.fit()` and
+- `.collect()` is only permitted in fit/evaluation or execution boundaries such as model training and backtest execution.
   `BacktestEngine.run()`. Everywhere else: LazyFrame.
 - `EventExtraction` (Pydantic model) is the only LLM output type that crosses
   into trading logic. Raw text is never used for decisions.
@@ -1311,7 +1359,7 @@ Verify before proceeding:
 
 - `fetch_minute(StockInstrument(...), ...)` raises `TypeError`
 - `fetch_daily(FundInstrument(...), ...)` calls `source.fund_nav()` correctly
-- `ModelPipeline.load("stock_ranker", config)` derives path entirely from config
+- `ModelRegistry.from_config(config)` derives artifact paths entirely from config
 - `QoreStore.from_config(config)` needs no other arguments
 - A `Universe([StockInstrument(...), FundInstrument(...)])` raises `TypeError`
 

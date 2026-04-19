@@ -91,6 +91,78 @@ DATASETS: dict[str, Dataset] = {
         partition_cols=["year", "symbol"],
         dedup_keys=["announce_date", "symbol", "report_date"],
     ),
+    "index_constituents": Dataset(
+        name="index_constituents",
+        schema=pa.schema(
+            [
+                ("as_of", pa.date32()),
+                ("index_symbol", pa.string()),
+                ("symbol", pa.string()),
+                ("exchange", pa.string()),
+                ("industry", pa.string()),
+            ]
+        ),
+        partition_cols=["index_symbol"],
+        dedup_keys=["as_of", "index_symbol", "symbol"],
+    ),
+    "stock_profiles": Dataset(
+        name="stock_profiles",
+        schema=pa.schema(
+            [
+                ("as_of", pa.date32()),
+                ("symbol", pa.string()),
+                ("short_name", pa.string()),
+                ("exchange", pa.string()),
+                ("industry", pa.string()),
+                ("board", pa.string()),
+                ("listing_date", pa.date32()),
+                ("total_market_cap", pa.float64()),
+                ("float_market_cap", pa.float64()),
+                ("total_shares", pa.float64()),
+                ("float_shares", pa.float64()),
+                ("is_st", pa.bool_()),
+            ]
+        ),
+        partition_cols=["symbol"],
+        dedup_keys=["as_of", "symbol"],
+    ),
+    "analyst_forecasts": Dataset(
+        name="analyst_forecasts",
+        schema=pa.schema(
+            [
+                ("as_of", pa.date32()),
+                ("symbol", pa.string()),
+                ("report_count", pa.int64()),
+                ("buy", pa.int64()),
+                ("overweight", pa.int64()),
+                ("neutral", pa.int64()),
+                ("underweight", pa.int64()),
+                ("sell", pa.int64()),
+                ("eps_year1", pa.float64()),
+                ("eps_year2", pa.float64()),
+                ("eps_year3", pa.float64()),
+                ("eps_year4", pa.float64()),
+            ]
+        ),
+        partition_cols=["symbol"],
+        dedup_keys=["as_of", "symbol"],
+    ),
+    "announcements": Dataset(
+        name="announcements",
+        schema=pa.schema(
+            [
+                ("symbol", pa.string()),
+                ("short_name", pa.string()),
+                ("title", pa.string()),
+                ("notice_type", pa.string()),
+                ("notice_date", pa.date32()),
+                ("art_code", pa.string()),
+                ("url", pa.string()),
+            ]
+        ),
+        partition_cols=["symbol"],
+        dedup_keys=["symbol", "art_code"],
+    ),
     "factor_scores": Dataset(
         name="factor_scores",
         schema=pa.schema(

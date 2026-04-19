@@ -5,7 +5,7 @@ from datetime import date
 import polars as pl
 import pytest
 from qore_core import DerivativeInstrument, FundInstrument, StockInstrument
-from qore_data.fetch import fetch_daily, fetch_minute
+from qore_data.fetch import fetch_daily, fetch_minute, fetch_profile
 
 
 class StubFundSource:
@@ -20,6 +20,20 @@ class StubFundSource:
                 "symbol": [inst.symbol],
                 "start": [start],
                 "end": [end],
+            }
+        )
+
+
+class StubStockSource:
+    async def stock_profile(
+        self,
+        inst: StockInstrument,
+        as_of: date,
+    ) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "symbol": [inst.symbol],
+                "as_of": [as_of],
             }
         )
 
@@ -76,3 +90,10 @@ async def test_fetch_minute_accepts_derivative() -> None:
         freq_minutes=5,
     )
     assert result.get_column("freq_minutes").to_list() == [5]
+
+
+@pytest.mark.asyncio
+async def test_fetch_profile_routes_stock_to_stock_profile() -> None:
+    inst = StockInstrument(symbol="600519.SH", exchange="SH", industry="food")
+    result = await fetch_profile(inst, date(2026, 1, 31), StubStockSource())
+    assert result.get_column("symbol").to_list() == ["600519.SH"]

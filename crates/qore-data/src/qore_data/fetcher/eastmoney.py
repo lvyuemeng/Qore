@@ -14,6 +14,7 @@ from qore_core.instrument import FundInstrument, StockInstrument
 
 class EastMoneyFetcher:
     _PREFIX = {"SH": "1", "SZ": "0", "BJ": "0"}
+    _STOCK_INFO_URL = "https://push2.eastmoney.com/api/qt/stock/get"
     _KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     _FUND_NAV_URL = "https://api.fund.eastmoney.com/f10/lsjz"
     _CONSTITUENT_URL = "https://push2.eastmoney.com/api/qt/clist/get"
@@ -61,6 +62,7 @@ class EastMoneyFetcher:
             "float_share_ratio": pl.Float64,
         },
         "analyst_forecast": {
+            "as_of": pl.Date,
             "symbol": pl.String,
             "report_count": pl.Int64,
             "buy": pl.Int64,
@@ -81,6 +83,20 @@ class EastMoneyFetcher:
             "notice_date": pl.Date,
             "art_code": pl.String,
             "url": pl.String,
+        },
+        "stock_profile": {
+            "as_of": pl.Date,
+            "symbol": pl.String,
+            "short_name": pl.String,
+            "exchange": pl.String,
+            "industry": pl.String,
+            "board": pl.String,
+            "listing_date": pl.Date,
+            "total_market_cap": pl.Float64,
+            "float_market_cap": pl.Float64,
+            "total_shares": pl.Float64,
+            "float_shares": pl.Float64,
+            "is_st": pl.Boolean,
         },
     }
 
@@ -244,6 +260,39 @@ class EastMoneyFetcher:
             )
         return instruments
 
+    async def stock_profile(
+        self,
+        inst: StockInstrument,
+        as_of: date,
+    ) -> pl.DataFrame:
+        payload = await self._request_json(
+            self._STOCK_INFO_URL,
+            params=self._stock_profile_params(inst),
+            referer=(
+                "https://quote.eastmoney.com/concept/"
+                f"{inst.exchange.lower()}{self._symbol_digits(inst.symbol)}.html?from=classic"
+            ),
+        )
+        data = payload.get("data") or {}
+        if not data:
+            return self._empty_frame("stock_profile")
+        short_name = str(data.get("f58") or "")
+        row = {
+            "as_of": as_of,
+            "symbol": inst.symbol,
+            "short_name": short_name,
+            "exchange": inst.exchange,
+            "industry": str(data.get("f127") or inst.industry),
+            "board": self._board_from_symbol(inst.symbol),
+            "listing_date": self._parse_compact_date(data.get("f189")),
+            "total_market_cap": self._to_float(data.get("f116")),
+            "float_market_cap": self._to_float(data.get("f117")),
+            "total_shares": self._to_float(data.get("f84")),
+            "float_shares": self._to_float(data.get("f85")),
+            "is_st": short_name.startswith(("ST", "*ST")),
+        }
+        return pl.DataFrame([row]).select(self._empty_frame("stock_profile").columns)
+
     async def fund_nav(
         self,
         inst: FundInstrument,
@@ -335,7 +384,11 @@ class EastMoneyFetcher:
             return self._empty_frame("fund_holdings")
         return pl.DataFrame(rows).select(self._empty_frame("fund_holdings").columns)
 
-    async def analyst_forecast(self, inst: StockInstrument) -> pl.DataFrame:
+    async def analyst_forecast(
+        self,
+        inst: StockInstrument,
+        as_of: date,
+    ) -> pl.DataFrame:
         payload = await self._request_json(
             self._ANALYST_URL,
             params=self._analyst_forecast_params(inst),
@@ -348,6 +401,7 @@ class EastMoneyFetcher:
 
         year_columns = [self._to_float(matched.get(f"EPS{i}")) for i in range(1, 5)]
         row = {
+            "as_of": as_of,
             "symbol": inst.symbol,
             "report_count": self._to_int(matched.get("RATING_ORG_NUM")),
             "buy": self._to_int(matched.get("BUY")),
@@ -554,6 +608,14 @@ class EastMoneyFetcher:
             "_": "0",
         }
 
+    def _stock_profile_params(self, inst: StockInstrument) -> dict[str, Any]:
+        return {
+            "fltt": "2",
+            "invt": "2",
+            "fields": "f57,f58,f84,f85,f116,f117,f127,f189",
+            "secid": self._stock_secid(inst),
+        }
+
     def _fund_holdings_params(
         self,
         symbol: str,
@@ -651,6 +713,14 @@ class EastMoneyFetcher:
                 return parsed
         return None
 
+    def _parse_compact_date(self, value: Any) -> date | None:
+        if value in (None, "", "-"):
+            return None
+        digits = str(value)
+        if len(digits) != 8 or not digits.isdigit():
+            return None
+        return date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+
     def _difference(self, left: Any, right: Any) -> float | None:
         left_value = self._to_float(left)
         right_value = self._to_float(right)
@@ -684,6 +754,16 @@ class EastMoneyFetcher:
 
     def _symbol_digits(self, symbol: str) -> str:
         return symbol.split(".", maxsplit=1)[0]
+
+    def _board_from_symbol(self, symbol: str) -> str:
+        digits = self._symbol_digits(symbol)
+        if digits.startswith("688"):
+            return "STAR"
+        if digits.startswith("300"):
+            return "ChiNext"
+        if digits.startswith(("8", "4")):
+            return "Beijing"
+        return "MainBoard"
 
     def _to_float(self, value: Any) -> float | None:
         if value in (None, "", "-"):

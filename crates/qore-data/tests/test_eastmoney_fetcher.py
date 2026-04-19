@@ -5,7 +5,11 @@ from typing import Any
 
 import pytest
 from qore_core import FundInstrument, StockInstrument
-from qore_data.fetch import fetch_announcements
+from qore_data.fetch import (
+    fetch_analyst_forecast,
+    fetch_announcements,
+    fetch_profile,
+)
 from qore_data.fetcher.eastmoney import EastMoneyFetcher
 
 
@@ -194,10 +198,12 @@ async def test_analyst_forecast_parses_profit_prediction_payload() -> None:
         ]
     )
     result = await fetcher.analyst_forecast(
-        StockInstrument(symbol="600519.SH", exchange="SH", industry="food")
+        StockInstrument(symbol="600519.SH", exchange="SH", industry="food"),
+        date(2026, 4, 30),
     )
 
     assert result.get_column("symbol").to_list() == ["600519.SH"]
+    assert result.get_column("as_of").to_list() == [date(2026, 4, 30)]
     assert result.get_column("report_count").to_list() == [12]
     assert result.get_column("buy").to_list() == [5]
     assert result.get_column("overweight").to_list() == [4]
@@ -237,6 +243,90 @@ async def test_announcements_parse_notice_payload() -> None:
     assert result.get_column("symbol").to_list() == ["600519.SH"]
     assert result.get_column("notice_type").to_list() == ["财务报告"]
     assert result.get_column("title").to_list() == ["2025年年度报告"]
+
+
+@pytest.mark.asyncio
+async def test_stock_profile_parses_metadata_payload() -> None:
+    fetcher = StubEastMoneyFetcher(
+        [
+            {
+                "data": {
+                    "f57": "688001",
+                    "f58": "*ST样本",
+                    "f84": "1000000",
+                    "f85": "800000",
+                    "f116": "123456789",
+                    "f117": "100000000",
+                    "f127": "半导体",
+                    "f189": "20190722",
+                }
+            }
+        ]
+    )
+    inst = StockInstrument(symbol="688001.SH", exchange="SH", industry="unknown")
+    result = await fetcher.stock_profile(inst, date(2026, 4, 30))
+
+    assert result.get_column("symbol").to_list() == ["688001.SH"]
+    assert result.get_column("board").to_list() == ["STAR"]
+    assert result.get_column("industry").to_list() == ["半导体"]
+    assert result.get_column("is_st").to_list() == [True]
+
+
+@pytest.mark.asyncio
+async def test_fetch_profile_dispatches_for_stock() -> None:
+    fetcher = StubEastMoneyFetcher(
+        [
+            {
+                "data": {
+                    "f57": "600519",
+                    "f58": "贵州茅台",
+                    "f84": "1256197800",
+                    "f85": "1256197800",
+                    "f116": "2100000000000",
+                    "f117": "2100000000000",
+                    "f127": "酿酒行业",
+                    "f189": "20010827",
+                }
+            }
+        ]
+    )
+    inst = StockInstrument(symbol="600519.SH", exchange="SH", industry="food")
+    result = await fetch_profile(inst, date(2026, 4, 30), fetcher)
+
+    assert result.height == 1
+    assert result.get_column("short_name").to_list() == ["贵州茅台"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_analyst_forecast_dispatches_for_stock() -> None:
+    fetcher = StubEastMoneyFetcher(
+        [
+            {
+                "result": {
+                    "data": [
+                        {
+                            "SECURITY_CODE": "600519",
+                            "RATING_ORG_NUM": "12",
+                            "BUY": "5",
+                            "HOLD": "4",
+                            "NEUTRAL": "2",
+                            "SELL": "1",
+                            "STRONG_SELL": "0",
+                            "EPS1": "3.21",
+                            "EPS2": "3.55",
+                            "EPS3": "3.88",
+                            "EPS4": "4.12",
+                        }
+                    ]
+                }
+            }
+        ]
+    )
+    inst = StockInstrument(symbol="600519.SH", exchange="SH", industry="food")
+    result = await fetch_analyst_forecast(inst, date(2026, 4, 30), fetcher)
+
+    assert result.height == 1
+    assert result.get_column("report_count").to_list() == [12]
 
 
 @pytest.mark.asyncio

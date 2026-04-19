@@ -3,81 +3,122 @@
 ## Goal
 
 Rewrite the repository into the `Qore` architecture defined in `docs/design.md`.
-This is not an incremental refactor of `quant_trade`; it is a staged replacement of
-the current single-package project with a uv-workspace monorepo built around typed,
-config-driven crates and a ranking-first workflow.
+This is a staged replacement of legacy `src/quant_trade`, not an incremental refactor.
 
-## Current Repository Assessment
+## Document Map
 
-The current codebase is useful as a source of domain knowledge and endpoint reverse
-engineering, but it does not match the target architecture.
-
-### What exists today
-
-- Single Python package: `src/quant_trade`
-- Direct provider integrations: `akshare`, `baostock`, EastMoney client wrappers
-- ArcticDB/LMDB-centered storage in `src/quant_trade/config/arctic.py`
-- Eager `polars.DataFrame` feature engineering in `src/quant_trade/feature/*`
-- LightGBM training stack in `src/quant_trade/model/*`
-- Ad hoc scripts and local model artifacts in `scripts/`, `model/`, `db/`, `logs/`
-
-### Main gaps vs `docs/design.md`
-
-- No uv workspace or crate layout under `crates/`
-- Package identity still `quant-trade`, not `qore`
-- Direct `akshare` imports are widespread, while target design bans them in crates
-- Storage backend is ArcticDB, while target design requires DuckDB + Parquet lake
-- Architecture is eager/DataFrame-oriented, while target design is LazyFrame-first
-- No sealed instrument union, homogeneous universe model, or session-typed routing
-- No `singledispatch` public data/backtest API by instrument type
-- Config is partial and file-path-driven, not centralized as `QoreConfig`
-- Intelligence/model/signal/runner/backtest boundaries do not exist yet
-- Existing scripts couple training, storage, feature joining, and prediction tightly
-
-### Migration stance
-
-- Preserve the current project only as reference code during the rewrite
-- Preserve `.ai/` as local reference material only; keep it gitignored and out of runtime dependencies
-- Do not try to adapt ArcticDB storage or `quant_trade` package into the final shape
-- Reuse endpoint knowledge, normalization logic, and factor ideas where valuable
-- Build new crates in parallel, then retire legacy modules once parity is reached
+- `docs/design.md`: canonical architecture and design rules
+- `docs/roadmap.md`: rewrite status, milestones, phases, and next priorities
+- `docs/config.md`: current configuration structure and rules
+- `docs/workflow.md`: current library-first workflow and near-term workflow target
+- `docs/migration-inventory.md`: legacy-to-new mapping details
 
 ## Rewrite Principles
 
 1. New architecture first, compatibility second.
-2. No new features in legacy `src/quant_trade` unless needed for migration support.
-3. Every new class that depends on paths or tuning params must use `from_config()`.
-4. All new data-path logic targets DuckDB + Parquet, never ArcticDB.
-5. All instrument-specific behavior uses `singledispatch`, never `isinstance` chains.
-6. All new analytical pipelines stay lazy until explicitly allowed collection points.
-7. Treat `.ai/refs/akshare/` and current provider code as references, not dependencies.
-8. Keep `.ai/` ignored by git; it is a local reverse-engineering workspace, not product source.
+2. No new product evolution in legacy `src/quant_trade` except migration support.
+3. Every new class that depends on paths or runtime parameters should expose `from_config()`.
+4. All new storage targets DuckDB + Parquet, never ArcticDB.
+5. Instrument-specific behavior uses `singledispatch`, not `isinstance` chains.
+6. Analytical pipelines stay lazy until an explicit collection point.
+7. `.ai/refs/akshare/` and legacy provider code are references, not runtime dependencies.
+8. Preserve formulas and endpoint knowledge, not legacy abstractions.
+9. Separate behavior from persisted data structures, especially in model export/import design.
 
-## Target End State
+## Current State
 
-```text
-qore/
-|- .ai/
-|- crates/
-|  |- qore-core/
-|  |- qore-data/
-|  |- qore-factor/
-|  |- qore-intelligence/
-|  |- qore-runner/
-|  \- qore-backtest/
-|- data/
-|- models/
-|- docs/
-|- justfile
-\- pyproject.toml
-```
+Rewrite stage: late `Milestone B` and early `Milestone C`.
 
-.ai/ remains local-only reference material and should stay gitignored.
+Current macro status:
 
-Legacy directories such as `src/quant_trade`, `db/`, `model/`, and ad hoc scripts
-should become migration-only and then be removed.
+- Foundation and workspace migration are complete enough for active crate-first work
+- Data, factor, intelligence, runner, and backtest layers all exist and can interact
+- One partial stock-ranking flow exists across the new crates
+- The system is still library-first and not yet an operator-ready product workflow
 
-## Progress Checklist
+What is working now:
+
+- `qore-core`: typed config, calendar, instrument, and universe primitives are in place
+- `qore-data`: EastMoney-backed stock and fund data paths work through DuckDB + Parquet storage
+- `qore-factor`: lazy factor computation, normalization, evaluation, and persistence are present
+- `qore-intelligence`: baseline ranking model, validation IC recording, and news-score persistence exist
+- `qore-runner`: ranking flow, news blending, and volatility-aware sizing are partially integrated
+- `qore-backtest`: dispatched fills, engine skeleton, and metrics exist for a basic simulation loop
+
+What is not done yet:
+
+- No official user-facing CLI or stable crate entrypoint contract
+- No single documented daily workflow that a user can run without code assembly
+- No production-grade EastMoney resilience evidence under sustained load
+- No completed benchmark-quality stock-ranking backtest on real historical datasets
+- No broader source expansion beyond the current EastMoney-first scope
+- Current intelligence design still mixes model behavior and persisted model state more than desired
+- Some current model-shape settings still live in config even though they should move into trained artifacts
+- Stock-universe-specific metadata is still thin for serious A-share workflows
+
+## Next Step
+
+Immediate next step:
+
+- deliver one reproducible A-share stock workflow that wires fetch -> factor -> model -> runner -> backtest from documented config and commands
+- separate model artifact data, model registry behavior, and fit/predict pipeline behavior in the intelligence layer design
+
+After that:
+
+- harden EastMoney operational behavior
+- tighten runner/backtest realism
+- decide whether source expansion remains deferred or becomes active scope
+
+## Macro Plan
+
+Milestones are macro delivery checkpoints. Phases are implementation slices inside those milestones.
+
+### Milestone A - Foundation
+
+Goal: stop legacy-first development and establish the workspace, core types, and migration rules.
+
+Contains phases:
+
+- Phase 0: Freeze and prepare
+- Phase 1: Workspace bootstrap
+- Phase 2: Core domain rewrite
+
+Status: largely complete.
+
+### Milestone B - Data to Signal
+
+Goal: make the new stack capable of producing usable inputs, factors, and ranking signals.
+
+Contains phases:
+
+- Phase 3: Data layer rewrite
+- Phase 4: Factor engine rewrite
+- Phase 5: Intelligence rewrite
+
+Status: mostly in place, but still missing production hardening and cleaner workflow packaging.
+
+### Milestone C - Portfolio to Backtest
+
+Goal: turn model outputs into target portfolios and evaluate them through the new backtest layer.
+
+Contains phases:
+
+- Phase 6: Runner rewrite
+- Phase 7: Backtest rewrite
+
+Status: started, with runnable skeletons but incomplete accounting realism and operator workflow.
+
+### Milestone D - Cutover
+
+Goal: move active usage fully onto the new crates and retire legacy runtime paths.
+
+Contains phases:
+
+- Phase 8: Migration cutover and legacy removal
+
+Status: not started.
+
+## Phase Status Snapshot
 
 Status key:
 
@@ -85,331 +126,176 @@ Status key:
 - `[-]` in progress
 - `[x]` completed
 
-### Phase 0 checklist
+| Phase | Scope | Status | Current summary |
+| --- | --- | --- | --- |
+| Phase 0 | Freeze and prepare | `[x]` | Design, migration stance, and `.ai/` reference workflow are established |
+| Phase 1 | Workspace bootstrap | `[x]` | uv workspace and crate layout exist; legacy package is no longer primary |
+| Phase 2 | Core domain rewrite | `[x]` | Typed config, instrument, calendar, and universe foundations are in place |
+| Phase 3 | Data layer rewrite | `[-]` | Dispatch and store exist; EastMoney and store hardening still remain |
+| Phase 4 | Factor engine rewrite | `[-]` | Lazy factor pipeline exists; factor breadth and tests still need expansion |
+| Phase 5 | Intelligence rewrite | `[-]` | Baseline ranking pipeline exists; broader validation and signal maturity remain |
+| Phase 6 | Runner rewrite | `[-]` | Ranking, news blending, and volatility-aware sizing exist; portfolio construction remains shallow |
+| Phase 7 | Backtest rewrite | `[-]` | Engine skeleton and metrics exist; deeper accounting realism remains |
+| Phase 8 | Cutover and legacy removal | `[ ]` | New crate flow is not yet the sole supported runtime path |
 
-- `[x]` `docs/design.md` exists as the canonical target spec
-- `[x]` `docs/roadmap.md` exists and frames the rewrite as replacement, not refactor
-- `[x]` `.ai/` is treated as reference-only material
-- `[x]` `.ai/` is ignored by git
-- `[ ]` Add or finalize `.ai/AGENTS.md` rules aligned with the design doc
-- `[x]` Add or finalize `just ai-refs` for local reference sync
-- `[x]` Mark legacy areas in `README.md`
-- `[x]` Create explicit migration inventory per legacy module
+## Phase Details
 
-### Phase 1 checklist
+### Phase 0 - Freeze and Prepare
 
-- `[x]` Rewrite root `pyproject.toml` to uv workspace format
-- `[x]` Create `crates/` directory structure
-- `[x]` Create `crates/qore-core`
-- `[x]` Create `crates/qore-data`
-- `[x]` Create `crates/qore-factor`
-- `[x]` Create `crates/qore-intelligence`
-- `[x]` Create `crates/qore-runner`
-- `[x]` Create `crates/qore-backtest`
-- `[x]` Move shared lint/type/test config to workspace root
-- `[x]` Stop treating `src/quant_trade` as the primary package
+Macro goal: stop deepening the legacy architecture and prepare for parallel rewrite.
 
-### Phase 2 checklist
+Micro deliverables:
 
-- `[x]` Implement `qore_core/instrument.py`
-- `[x]` Implement `qore_core/config.py`
-- `[x]` Implement `qore_core/calendar.py`
-- `[x]` Implement `qore_core/universe.py`
-- `[x]` Add config-derived constructors where required
-- `[x]` Verify homogeneous-universe constraint
+- keep `docs/design.md` as the canonical target spec
+- keep `.ai/` as local reference material only
+- maintain migration inventory and legacy marking
 
-### Phase 3 checklist
+Status: complete.
 
-- `[x]` Implement typed source protocols in `qore-data`
-- `[x]` Implement `fetch_daily()` via `singledispatch`
-- `[x]` Implement `fetch_minute()` via `singledispatch`
-- `[x]` Implement `fetch_tick()` via `singledispatch`
-- `[x]` Implement `fetch_fundamentals()` via `singledispatch`
-- `[-]` Rebuild EastMoney fetcher without runtime `akshare` dependency
-- `[x]` Implement dataset schema registry
-- `[-]` Implement DuckDB + Parquet store
-- `[x]` Register named dataset views
+### Phase 1 - Workspace Bootstrap
 
-Current note:
+Macro goal: replace the single-package layout with a uv workspace monorepo.
 
-- `qore-data` now validates read filters, deduplicates repeated parquet writes, and covers fund holdings, analyst forecast data, and stock announcements alongside daily/nav/fundamental EastMoney paths; store ergonomics and broader endpoint coverage remain in progress.
+Micro deliverables:
 
-### Phase 4 checklist
+- workspace root uses `uv`
+- crate skeletons exist under `crates/`
+- shared lint, type, and test tooling is centralized
 
-- `[-]` Define `Factor` protocol
-- `[-]` Implement core factor families
-- `[-]` Implement lazy `FactorPipeline`
-- `[-]` Implement normalization and neutralization flow
-- `[x]` Persist factor outputs into `factor_scores`
+Status: complete.
 
-Current note:
+### Phase 2 - Core Domain Rewrite (`qore-core`)
 
-- `qore-factor` now computes factors lazily, supports normalization and neutralization, evaluates cross-sectional IC/ICIR, persists standardized outputs into `factor_scores`, and includes realized-volatility plus legacy-inspired fundamental quality, cashflow, and growth formulas extracted as design-aligned factors rather than direct class ports.
+Macro goal: establish immutable, typed platform foundations.
 
-### Phase 5 checklist
+Micro deliverables:
 
-- `[x]` Implement model normalizers
-- `[x]` Implement `MultiHorizonRanker`
-- `[x]` Implement config-driven `ModelPipeline`
-- `[-]` Port purged / walk-forward validation concepts into the new layer
-- `[-]` Implement signal modules (`triage`, `sentiment`, `llm`, `score`)
-- `[x]` Implement `SignalCombiner`
+- sealed instrument model
+- centralized `QoreConfig`
+- session-aware trading calendar
+- homogeneous universe model
 
-Current note:
+Status: complete enough for dependent crate work.
 
-- `qore-intelligence` now has config-derived normalizers, a baseline multi-horizon ranking model, a persisted `ModelPipeline`, a news pipeline that scores and writes article-derived `news_scores`, and purged validation primitives that now feed recorded validation ICs during fitting.
+### Phase 3 - Data Layer Rewrite (`qore-data`)
 
-### Phase 6 checklist
+Macro goal: rebuild ingestion and storage around typed protocols and Parquet-lake storage.
 
-- `[-]` Define `Strategy` protocol
-- `[-]` Implement ranking-based strategy
-- `[-]` Implement screener strategy
-- `[-]` Implement behavioral gating wrapper
-- `[-]` Implement sizers and risk manager
-- `[-]` Implement `StrategyRunner`
+Micro deliverables:
 
-Current note:
+- `singledispatch` fetch APIs by instrument type
+- EastMoney fetcher reimplemented without runtime `akshare`
+- DuckDB + Parquet store and dataset schema registry
+- validated read/write and named dataset views
 
-- `qore-runner` now threads `news_scores` through strategy generation, blends them in the ranking path, and includes an inverse-volatility sizer with capped renormalization; broader end-to-end portfolio construction still remains in progress.
+Current state:
 
-### Phase 7 checklist
+- filter validation, repeated-write deduplication, and several EastMoney datasets are already implemented
+- broader endpoint coverage and operational hardening remain unfinished
+- richer stock-universe metadata still remains unfinished, especially historical constituent, industry, and status views
 
-- `[-]` Implement `fill_order()` dispatch by instrument type
-- `[-]` Implement `BacktestEngine`
-- `[-]` Implement portfolio/accounting result model
-- `[-]` Implement metrics module
+### Phase 4 - Factor Engine Rewrite (`qore-factor`)
 
-Current note:
+Macro goal: move feature engineering to composable lazy factor pipelines.
 
-- `qore-backtest` now includes dispatched fills, a runnable engine skeleton, and richer result metrics, but still needs tighter integration with completed data/model layers.
-
-### Phase 8 checklist
-
-- `[ ]` Move active workflows to new crate entrypoints
-- `[ ]` Remove dependency on ArcticDB runtime paths
-- `[ ]` Remove dependency on `src/quant_trade`
-- `[ ]` Retire or archive `scripts/smoke_train.py`
-- `[ ]` Retire or archive legacy local artifacts under `db/`, `model/`, and `logs/`
-- `[ ]` Update docs to describe only the new architecture
-
-## Phased Roadmap
-
-## Phase 0 - Freeze and Prepare
-
-Objective: stop deepening the legacy architecture and prepare the repository for a
-parallel rewrite.
-
-Deliverables:
-
-- Keep `docs/design.md` as the canonical target spec
-- Add `.ai/AGENTS.md` with the rules from the design doc
-- Add `just ai-refs` and clone `.ai/refs/akshare` locally
-- Create a migration inventory document mapping legacy modules to target crates
-- Mark `src/quant_trade` as legacy in `README.md`
-
-Exit criteria:
-
-- Team works against the Qore design, not the current package shape
-- Reference repo for AkShare endpoint reading is available locally and ignored by git
-
-## Phase 1 - Workspace Bootstrap
-
-Objective: replace the single-package layout with a uv workspace monorepo.
-
-Deliverables:
-
-- Rewrite root `pyproject.toml` to use `[tool.uv.workspace]`
-- Create crate skeletons under `crates/`
-- Rename package identity from `quant-trade` to `qore`
-- Standardize tool config: ruff, mypy strict, pytest, optional extras per crate
-- Add crate-local tests and minimal import smoke checks
-
-Suggested order:
-
-1. `qore-core`
-2. `qore-data`
-3. `qore-factor`
-4. `qore-intelligence`
-5. `qore-runner`
-6. `qore-backtest`
-
-Exit criteria:
-
-- `uv sync` installs a workspace with independent crates
-- Legacy package is no longer the primary entrypoint
-
-## Phase 2 - Core Domain Rewrite (`qore-core`)
-
-Objective: establish the immutable, typed foundation that every other crate uses.
-
-Scope:
-
-- `instrument.py`: `StockInstrument`, `FundInstrument`, `DerivativeInstrument`
-- `config.py`: full `QoreConfig` tree with `from_yaml()`
-- `calendar.py`: `TradingCalendar` and session-aware `fill_date()`
-- `universe.py`: homogeneous `Universe`
-
-Migration notes:
-
-- Do not carry over current helper, storage, or provider abstractions from `src/quant_trade`
-
-Exit criteria:
-
-- Core types exist exactly in the shape expected by `docs/design.md`
-- Unit checks cover homogeneous universe and session fill semantics
-
-## Phase 3 - Data Layer Rewrite (`qore-data`)
-
-Objective: rebuild ingestion and storage around typed protocols and Parquet lakehouse
-storage.
-
-Scope:
-
-- Source protocols: `StockSource`, `FundSource`, `DerivativeSource`
-- Public fetch API: `fetch_daily`, `fetch_minute`, `fetch_tick`, `fetch_fundamentals`
-- EastMoney fetcher implemented with `httpx`, using `.ai/refs/akshare/` only as reference
-- `QoreStore` with DuckDB + Parquet datasets and named schemas
-- Registration of dataset views and validated read/write paths
-
-Legacy reuse candidates:
-
-- EastMoney endpoint knowledge from `src/quant_trade/client/eastmoney.py`
-- Column mapping logic from current builders/parsers
-- Universe/index constituent mapping ideas from provider code
-
-Legacy code to retire, not port directly:
-
-- `src/quant_trade/provider/akshare.py`
-- `src/quant_trade/provider/baostock.py`
-- `src/quant_trade/config/arctic.py`
-- `src/quant_trade/feature/store.py`
-
-Exit criteria:
-
-- No crate imports `akshare`
-- Daily/fundamental dispatch works by instrument type
-- Store reads return `pl.LazyFrame`
-- Storage writes target `data/raw` and DuckDB views
-
-## Phase 4 - Factor Engine Rewrite (`qore-factor`)
-
-Objective: move feature engineering from eager ad hoc transforms to composable lazy
-factor pipelines.
-
-Scope:
+Micro deliverables:
 
 - `Factor` protocol with `requires` and `produces`
-- `FactorPipeline.add()`, `.normalize()`, `.neutralize()`, `.run()`, `.evaluate()`
-- Initial factor set: momentum, book-to-price, ROE stability, SUE, carry
-- Standardized persistence into `factor_scores`
+- lazy `FactorPipeline`
+- normalization, neutralization, evaluation, and persistence
+- initial useful factor families for ranking workflows
 
-Legacy reuse candidates:
+Current state:
 
-- Factor formulas from `src/quant_trade/feature/process.py`
-- Cross-sectional normalization concepts from `SectorGroup` / `CrossSectionFlow`
+- lazy computation, normalization, neutralization, evaluation, and `factor_scores` persistence exist
+- realized-volatility plus multiple quality, cashflow, and growth factors are already present
+- more factor breadth and stronger reconstruction/testing coverage remain
 
-Important rewrite decisions:
+### Phase 5 - Intelligence Rewrite (`qore-intelligence`)
 
-- Preserve formulas, not classes
-- Replace eager `.collect()` patterns with LazyFrame expressions
-- Separate raw factor computation from normalization storage
+Macro goal: unify model ranking and news signals into one intelligence layer.
 
-Exit criteria:
+Micro deliverables:
 
-- Factor pipeline can compute and normalize lazily from store-backed inputs
-- `factor_scores` dataset stores both `raw_value` and `z_score`
+- model normalizers and ranking model
+- fit/predict pipeline separated from artifact data and registry behavior
+- purged and walk-forward-style validation
+- optional signal modules and signal combination
 
-## Phase 5 - Intelligence Rewrite (`qore-intelligence`)
+Current state:
 
-Objective: unify model ranking and news signal generation behind one intelligence
-layer.
+- baseline multi-horizon ranking pipeline exists and records validation IC during fitting
+- article-derived news scoring exists
+- current implementation still conflates some persisted model metadata with runtime pipeline behavior
+- current config still carries some model-shape settings that should migrate into exported artifacts
+- signal-stack maturity and broader validation coverage still remain
 
-Scope:
+### Phase 6 - Runner Rewrite (`qore-runner`)
 
-- `model/normalizer.py`
-- `model/lgbm_rank.py`
-- `model/pipeline.py`
-- `signal/triage.py`, `sentiment.py`, `llm.py`, `score.py`
-- `combine.py`
+Macro goal: define strategy generation and portfolio construction independently from execution simulation.
 
-Legacy reuse candidates:
+Micro deliverables:
 
-- Purged CV ideas from `src/quant_trade/model/process.py`
-- LightGBM tuning/training logic from `src/quant_trade/model/lgb.py`
-- Model metadata persistence concepts from `src/quant_trade/model/store.py`
+- strategy protocol and ranking-based strategy
+- screener and behavioral gating flows
+- sizers, risk manager, and `StrategyRunner`
 
-Important rewrite decisions:
+Current state:
 
-- Rebuild training around `ModelPipeline.from_config()` and versioned model roots
-- Replace current script-driven train/predict flow with reusable pipeline objects
-- Make ranking multi-horizon by default
-- Make news optional behind extras, default off until stable
+- runner now threads `news_scores` and factor-derived volatility into portfolio generation
+- broader strategy depth, risk behavior, and cleaner portfolio construction still remain
 
-Exit criteria:
+### Phase 7 - Backtest Rewrite (`qore-backtest`)
 
-- `ModelPipeline.load("stock_ranker", config)` resolves fully from config
-- Walk-forward ranking training works end to end against store/factor outputs
+Macro goal: implement session-aware execution simulation and portfolio accounting.
 
-## Phase 6 - Runner Rewrite (`qore-runner`)
+Micro deliverables:
 
-Objective: define strategy generation and portfolio construction independently from
-backtest execution.
-
-Scope:
-
-- `Strategy` protocol with session compatibility
-- `RankingStrategy`, `CrossSectionalScreener`, `BehavioralGatedStrategy`
-- `PositionSizer`, `RiskManager`, `StrategyRunner`
-
-Legacy reuse candidates:
-
-- Ranking output interpretation from `scripts/smoke_train.py`
-- Existing factor weighting ideas
-
-Exit criteria:
-
-- Runner produces typed target portfolios from factor/model/news inputs
-- Stock, fund, and derivative configuration paths are separated cleanly
-
-## Phase 7 - Backtest Rewrite (`qore-backtest`)
-
-Objective: implement session-aware execution simulation and portfolio accounting.
-
-Scope:
-
-- `fill_order()` via `singledispatch`
+- dispatched `fill_order()` by instrument type
 - `BacktestEngine.from_config()`
-- metrics module for return/risk/IC/turnover analytics
+- portfolio/accounting result model and metrics
 
-Important rewrite decisions:
+Current state:
 
-- Execution semantics are driven by instrument/session model, not symbol naming
-- Stocks, funds, and derivatives each get explicit fill logic
+- engine skeleton, dispatched fills, and metrics exist
+- deeper accounting realism and more complete integration still remain
 
-Exit criteria:
+### Phase 8 - Migration Cutover and Legacy Removal
 
-- End-to-end backtest runs from universe + runner + store
-- Metrics include both portfolio and ranking diagnostics
+Macro goal: move active workflows fully to `qore-*` crates and retire obsolete runtime paths.
 
-## Phase 8 - Migration Cutover and Legacy Removal
+Micro deliverables:
 
-Objective: switch all active workflows to the new architecture and remove obsolete
-code.
+- create supported entrypoints on top of the new crates
+- remove ArcticDB runtime dependence
+- retire `src/quant_trade`, legacy scripts, and stale local artifacts
+- update docs to describe only the new architecture
 
-Tasks:
+Status: not started.
 
-- Move user-facing commands to new crate-based entrypoints
-- Migrate any needed local config into `QoreConfig`
-- Deprecate and then remove `src/quant_trade`
-- Remove ArcticDB-specific docs and scripts
-- Archive or delete stale local artifacts under `db/`, `model/`, `logs/` as appropriate
+## Active Implementation Priorities
 
-Exit criteria:
+### Now
 
-- Mainline development happens only in `crates/qore-*`
-- Legacy package and storage path are no longer required
+- build one supported end-to-end A-share example workflow
+- redesign intelligence persistence boundary so model artifact data is separate from model loading/saving behavior
+- document exact config, datasets, and command sequence
+- verify the current crate chain on one benchmark universe
+- add the stock-universe information needed for credible pool definition and category-aware evaluation
 
-## Module Mapping
+### Next
+
+- add EastMoney resilience testing, retry budgeting, and crawl telemetry
+- improve factor coverage only where it directly strengthens the current ranking flow
+- tighten runner and backtest realism around sizing, accounting, and diagnostics
+- extend stock-universe metadata with useful A-share-specific information from EastMoney-reimplemented endpoints
+
+### Later
+
+- decide explicit source expansion scope for Yahoo and crypto markets
+- perform cutover and legacy removal after the new path is genuinely usable
+
+## Legacy Mapping
 
 | Legacy area | Status | Target home |
 | --- | --- | --- |
@@ -427,42 +313,20 @@ Exit criteria:
 
 ## Risks
 
-- Directly migrating legacy classes will drag old abstractions into the new design
-- ArcticDB data already stored locally may tempt partial compatibility layers
-- Reusing AkShare runtime calls would violate the target contract and slow cleanup
-- Large eager feature pipelines may hide assumptions that must be re-expressed lazily
-- Legacy tests encode old architecture expectations and should not define the rewrite
-
-## Recommended Execution Plan
-
-### Milestone A - Foundation
-
-- Finish Phase 0 to Phase 2 first
-- Do not start factor/model rewrite before `qore-core` and `qore-data` APIs settle
-
-### Milestone B - Data to Signal
-
-- Complete Phase 3 to Phase 5
-- Reach one working stock ranking flow on daily data before adding funds/news/derivatives
-
-### Milestone C - Portfolio to Backtest
-
-- Complete Phase 6 and Phase 7
-- Validate one benchmark strategy end to end on A-shares
-
-### Milestone D - Cutover
-
-- Remove legacy package and obsolete assets
-- Update docs and commands to reflect only the new architecture
+- directly migrating legacy classes would drag old abstractions into the new design
+- ArcticDB compatibility pressure could weaken the rewrite boundary
+- runtime reuse of AkShare would violate the target contract
+- eager legacy assumptions may be hidden inside old factor pipelines and need lazy re-expression
+- early skeleton success can mask the remaining operator and production gaps
 
 ## Definition of Done
 
 The rewrite is complete when:
 
-- Repository structure matches the monorepo design
-- All new code depends on `qore-*` crates instead of `quant_trade`
-- Data storage is DuckDB + Parquet, not ArcticDB
-- Instrument-specific behavior is expressed via `singledispatch`
-- Model training and loading are config-derived and versioned
-- A full stock ranking backtest runs through the new stack end to end
-- Legacy `src/quant_trade` is removed or archived outside the active codepath
+- repository structure matches the monorepo design
+- all active code paths run through `qore-*` crates rather than `quant_trade`
+- storage is DuckDB + Parquet rather than ArcticDB
+- instrument-specific behavior is expressed via `singledispatch`
+- model training and loading are config-derived and versioned
+- one full stock-ranking workflow runs end to end through the new stack
+- legacy `src/quant_trade` is removed or archived out of the active path

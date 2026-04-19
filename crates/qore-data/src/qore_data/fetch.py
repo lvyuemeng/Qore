@@ -121,6 +121,44 @@ async def _fetch_stock_fundamentals(
 
 
 @singledispatch
+async def fetch_analyst_forecast(
+    inst: Instrument,
+    as_of: date,
+    source: object,
+) -> pl.DataFrame:
+    del as_of, source
+    raise TypeError(f"Analyst forecast not available for {type(inst).__name__}.")
+
+
+@fetch_analyst_forecast.register(StockInstrument)
+async def _fetch_stock_analyst_forecast(
+    inst: StockInstrument,
+    as_of: date,
+    source: StockSource,
+) -> pl.DataFrame:
+    return await source.analyst_forecast(inst, as_of)
+
+
+@singledispatch
+async def fetch_profile(
+    inst: Instrument,
+    as_of: date,
+    source: object,
+) -> pl.DataFrame:
+    del as_of, source
+    raise TypeError(f"Profile not available for {type(inst).__name__}.")
+
+
+@fetch_profile.register(StockInstrument)
+async def _fetch_stock_profile(
+    inst: StockInstrument,
+    as_of: date,
+    source: StockSource,
+) -> pl.DataFrame:
+    return await source.stock_profile(inst, as_of)
+
+
+@singledispatch
 async def fetch_announcements(
     inst: Instrument,
     start: date,

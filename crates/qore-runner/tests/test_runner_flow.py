@@ -159,3 +159,37 @@ def test_vol_scaled_sizer_caps_single_name_weight() -> None:
 
     assert weights["AAA"] == pytest.approx(0.55)
     assert weights["BBB"] == pytest.approx(0.45)
+
+
+def test_strategy_runner_injects_volatility_into_vol_scaled_sizer() -> None:
+    universe = Universe(
+        [
+            StockInstrument(symbol="AAA", exchange="SH", industry="bank"),
+            StockInstrument(symbol="BBB", exchange="SZ", industry="tech"),
+        ]
+    )
+    runner = StrategyRunner.from_config(
+        QoreConfig.model_validate({"stock": {"max_weight": 0.7}}),
+        CrossSectionalScreener({"factor_a": 1.0}),
+        VolScaledSizer(top_k=2, max_weight=0.7),
+    )
+    factor_lf = pl.DataFrame(
+        {
+            "symbol": ["AAA", "BBB"],
+            "factor_a": [0.9, 0.8],
+            "realized_vol_20d": [0.2, 0.4],
+        }
+    ).lazy()
+
+    result = runner.step(
+        factor_lf,
+        None,
+        universe,
+        date(2026, 4, 13),
+        {},
+        pl.Series("nav", [1.0, 1.02]),
+        TradingCalendar.from_config(QoreConfig()),
+    )
+
+    assert result.weights["AAA"] > result.weights["BBB"]
+    assert sum(result.weights.values()) == pytest.approx(1.0)

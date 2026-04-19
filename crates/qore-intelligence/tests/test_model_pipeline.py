@@ -7,9 +7,16 @@ import numpy as np
 import polars as pl
 from qore_core.config import QoreConfig
 from qore_data.store.duckdb import QoreStore
+from qore_intelligence.model.artifact import FeatureSchema, ModelArtifact, RankerSpec
+from qore_intelligence.model.lgbm_rank import MultiHorizonRanker
 from qore_intelligence.model.normalizer import CrossSectionalZScore, RankScaler
 from qore_intelligence.model.pipeline import ModelPipeline
+from qore_intelligence.model.registry import ModelRegistry
 from qore_intelligence.model.validation import PurgedKFold, PurgedTimeSplit
+from qore_intelligence.model.workflow import (
+    fit_and_save_model_from_store,
+    training_frame_from_store,
+)
 
 
 def test_rank_scaler_outputs_percentiles() -> None:
@@ -31,23 +38,38 @@ def test_cross_sectional_zscore_normalizes_by_group() -> None:
     assert np.isclose(transformed[2:].mean(), 0.0)
 
 
-def test_model_pipeline_load_path_derived_from_config(tmp_path: Path) -> None:
+def test_model_registry_path_derived_from_config(tmp_path: Path) -> None:
     config = QoreConfig.model_validate(
         {"intelligence": {"model_store_root": str(tmp_path)}}
     )
-    pipeline = ModelPipeline.from_config("stock_ranker", config)
-    pipeline.trained_on = pipeline.trained_on or __import__("datetime").date.today()
-    saved_path = pipeline.save("unit-test")
-    loaded = ModelPipeline.load("stock_ranker", config, version="unit-test")
-    assert (
-        saved_path == Path(tmp_path) / "stock_ranker" / "unit-test" / "pipeline.joblib"
+    registry = ModelRegistry.from_config(config)
+    artifact = ModelArtifact(
+        model_name="stock_ranker",
+        feature_schema=FeatureSchema(
+            factor_columns=["factor_a"],
+            target_columns=[
+                "forward_return_20d",
+                "forward_return_60d",
+                "forward_return_252d",
+            ],
+        ),
+        ranker_spec=RankerSpec(
+            model_family="multi_horizon_ranker",
+            horizons=[20, 60, 252],
+            ensemble_weights={"20d": 1 / 3, "60d": 1 / 3, "252d": 1 / 3},
+        ),
     )
-    assert loaded.name == "stock_ranker"
+    saved_path = registry.save(artifact, "unit-test")
+    loaded = registry.load("stock_ranker", version="unit-test")
+    assert (
+        saved_path == Path(tmp_path) / "stock_ranker" / "unit-test" / "artifact.joblib"
+    )
+    assert loaded.model_name == "stock_ranker"
 
 
 def test_model_pipeline_predict_score_returns_series() -> None:
     config = QoreConfig()
-    pipeline = ModelPipeline.from_config("stock_ranker", config)
+    pipeline = ModelPipeline.from_config(config)
     x = np.array([[1.0, 3.0], [2.0, 4.0]])
     pipeline.x_normalizer.fit(x)
     result = pipeline.predict_score(
@@ -87,20 +109,23 @@ def test_purged_kfold_yields_non_empty_splits() -> None:
     )
 
 
-def test_model_pipeline_fit_records_validation_ic(tmp_path: Path) -> None:
+def test_model_pipeline_fit_returns_artifact(tmp_path: Path) -> None:
     config = QoreConfig.model_validate(
         {
             "data": {
                 "db_path": str(tmp_path / "qore.duckdb"),
                 "parquet_root": str(tmp_path / "raw"),
             },
-            "intelligence": {
-                "horizons": [1, 2],
-                "ensemble_weights": {"1d": 0.5, "2d": 0.5},
-            },
         }
     )
-    pipeline = ModelPipeline.from_config("stock_ranker", config)
+    pipeline = ModelPipeline(
+        x_normalizer=RankScaler(),
+        y_transformer=CrossSectionalZScore(),
+        model=MultiHorizonRanker(
+            horizons=[1, 2],
+            weights={"1d": 0.5, "2d": 0.5},
+        ),
+    )
     factor_lf = pl.DataFrame(
         {
             "date": [
@@ -150,6 +175,130 @@ def test_model_pipeline_fit_records_validation_ic(tmp_path: Path) -> None:
         }
     ).lazy()
 
-    pipeline.fit(factor_lf, QoreStore.from_config(config))
+    artifact = pipeline.fit(
+        factor_lf,
+        QoreStore.from_config(config),
+        model_name="stock_ranker",
+    )
 
-    assert set(pipeline.validation_ic) == {"1d", "2d"}
+    assert artifact.model_name == "stock_ranker"
+    assert set(artifact.training_metadata.validation_metrics) == {"1d", "2d"}
+    restored = ModelPipeline.from_artifact(artifact)
+    assert restored.model.horizons == [1, 2]
+
+
+def test_training_frame_from_store_pivots_factor_scores(tmp_path: Path) -> None:
+    config = QoreConfig.model_validate(
+        {
+            "data": {
+                "db_path": str(tmp_path / "qore.duckdb"),
+                "parquet_root": str(tmp_path / "raw"),
+            }
+        }
+    )
+    store = QoreStore.from_config(config)
+    store.write(
+        "factor_scores",
+        pl.DataFrame(
+            {
+                "date": [
+                    date(2026, 1, 1),
+                    date(2026, 1, 1),
+                    date(2026, 1, 1),
+                    date(2026, 1, 1),
+                ],
+                "symbol": ["AAA", "AAA", "BBB", "BBB"],
+                "factor_name": ["factor_a", "factor_b", "factor_a", "factor_b"],
+                "raw_value": [0.1, 0.3, 0.2, 0.4],
+                "z_score": [0.1, 0.3, 0.2, 0.4],
+                "rank_pct": [0.5, 0.8, 0.6, 0.9],
+            }
+        ),
+    )
+    frame = training_frame_from_store(
+        store=store,
+        factor_names=["factor_a", "factor_b"],
+        forward_returns=pl.DataFrame(
+            {
+                "date": [date(2026, 1, 1), date(2026, 1, 1)],
+                "symbol": ["AAA", "BBB"],
+                "forward_return_1d": [0.01, 0.02],
+            }
+        ).lazy(),
+    ).collect()
+
+    assert set(frame.columns) == {
+        "date",
+        "symbol",
+        "factor_a",
+        "factor_b",
+        "forward_return_1d",
+    }
+    assert frame.height == 2
+
+
+def test_fit_and_save_model_from_store_returns_saved_artifact(tmp_path: Path) -> None:
+    config = QoreConfig.model_validate(
+        {
+            "data": {
+                "db_path": str(tmp_path / "qore.duckdb"),
+                "parquet_root": str(tmp_path / "raw"),
+            },
+            "intelligence": {"model_store_root": str(tmp_path / "models")},
+        }
+    )
+    store = QoreStore.from_config(config)
+    store.write(
+        "factor_scores",
+        pl.DataFrame(
+            {
+                "date": [
+                    date(2026, 1, 1),
+                    date(2026, 1, 1),
+                    date(2026, 1, 2),
+                    date(2026, 1, 2),
+                    date(2026, 1, 3),
+                    date(2026, 1, 3),
+                    date(2026, 1, 4),
+                    date(2026, 1, 4),
+                ],
+                "symbol": ["AAA", "BBB"] * 4,
+                "factor_name": ["factor_a"] * 8,
+                "raw_value": [0.1, 0.2, 0.2, 0.1, 0.3, 0.1, 0.4, 0.2],
+                "z_score": [0.1, 0.2, 0.2, 0.1, 0.3, 0.1, 0.4, 0.2],
+                "rank_pct": [0.5, 1.0, 1.0, 0.5, 1.0, 0.5, 1.0, 0.5],
+            }
+        ),
+    )
+    run = fit_and_save_model_from_store(
+        config=config,
+        model_name="stock_ranker",
+        store=store,
+        factor_names=["factor_a"],
+        forward_returns=pl.DataFrame(
+            {
+                "date": [
+                    date(2026, 1, 1),
+                    date(2026, 1, 1),
+                    date(2026, 1, 2),
+                    date(2026, 1, 2),
+                    date(2026, 1, 3),
+                    date(2026, 1, 3),
+                    date(2026, 1, 4),
+                    date(2026, 1, 4),
+                ],
+                "symbol": ["AAA", "BBB"] * 4,
+                "forward_return_1d": [0.01, 0.02, 0.02, 0.01, 0.03, 0.01, 0.04, 0.02],
+            }
+        ).lazy(),
+        version="store-train",
+        model=MultiHorizonRanker(horizons=[1], weights={"1d": 1.0}),
+    )
+
+    assert run.artifact.model_name == "stock_ranker"
+    assert run.artifact.feature_schema.factor_columns == ["factor_a"]
+    assert run.artifact.ranker_spec.horizons == [1]
+    assert (
+        run.artifact_path
+        == tmp_path / "models" / "stock_ranker" / "store-train" / "artifact.joblib"
+    )

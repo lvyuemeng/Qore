@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import date
-from pathlib import Path
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
-import joblib
 import numpy as np
 import polars as pl
 import polars.selectors as cs
 from qore_core.config import QoreConfig
 from qore_data.store.duckdb import QoreStore
 
+from qore_intelligence.model.artifact import (
+    FeatureSchema,
+    ModelArtifact,
+    ModelPayload,
+    RankerSpec,
+    TrainingMetadata,
+)
 from qore_intelligence.model.lgbm_rank import MultiHorizonRanker
 from qore_intelligence.model.normalizer import (
     CrossSectionalZScore,
@@ -25,36 +30,44 @@ _RESERVED_COLUMNS = {"symbol", "date"}
 
 @dataclass
 class ModelPipeline:
-    name: str
     x_normalizer: XNormalizer
     y_transformer: YTransformer
     model: MultiHorizonRanker
-    config: QoreConfig
-    trained_on: date | None = None
-    validation_ic: dict[str, float] = field(default_factory=dict)
-    _root: Path = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self._root = Path(self.config.intelligence.model_store_root) / self.name
 
     @classmethod
     def from_config(
         cls,
-        name: str,
         config: QoreConfig,
         *,
         x_normalizer: XNormalizer | None = None,
         y_transformer: YTransformer | None = None,
     ) -> ModelPipeline:
+        del config
         return cls(
-            name=name,
             x_normalizer=x_normalizer or RankScaler(),
             y_transformer=y_transformer or CrossSectionalZScore(),
-            model=MultiHorizonRanker.from_config(config),
-            config=config,
+            model=MultiHorizonRanker(),
         )
 
-    def fit(self, factor_lf: pl.LazyFrame, store: QoreStore) -> None:
+    @classmethod
+    def from_artifact(cls, artifact: ModelArtifact) -> ModelPipeline:
+        payload = artifact.payload
+        if payload is None:
+            msg = "ModelArtifact payload is missing."
+            raise ValueError(msg)
+        return cls(
+            x_normalizer=payload.x_normalizer,
+            y_transformer=payload.y_transformer,
+            model=payload.model,
+        )
+
+    def fit(
+        self,
+        factor_lf: pl.LazyFrame,
+        store: QoreStore,
+        *,
+        model_name: str,
+    ) -> ModelArtifact:
         del store
         frame = factor_lf.collect()
         if frame.is_empty():
@@ -71,8 +84,32 @@ class ModelPipeline:
         )
         targets = self._extract_targets(frame, group_labels)
         self.model.fit(transformed_x, targets, feature_columns)
-        self.trained_on = date.today()
-        self.validation_ic = self._compute_validation_ic(frame, feature_columns)
+        validation_metrics = self._compute_validation_ic(frame, feature_columns)
+        training_window = _training_window(frame)
+        return ModelArtifact(
+            model_name=model_name,
+            feature_schema=FeatureSchema(
+                factor_columns=feature_columns,
+                target_columns=[
+                    f"forward_return_{horizon}d" for horizon in self.model.horizons
+                ],
+            ),
+            ranker_spec=RankerSpec(
+                model_family="multi_horizon_ranker",
+                horizons=list(self.model.horizons),
+                ensemble_weights=dict(self.model.weights),
+            ),
+            training_metadata=TrainingMetadata(
+                validation_metrics=validation_metrics,
+                training_window=training_window,
+                trained_at=datetime.now(UTC),
+            ),
+            payload=ModelPayload(
+                x_normalizer=self.x_normalizer,
+                y_transformer=self.y_transformer,
+                model=self.model,
+            ),
+        )
 
     def predict_score(self, factor_lf: pl.LazyFrame) -> pl.Series:
         frame = factor_lf.collect()
@@ -83,41 +120,6 @@ class ModelPipeline:
         transformed_x = self.x_normalizer.transform(x)
         transformed = pl.DataFrame(transformed_x, schema=feature_columns)
         return self.model.predict_score(transformed)
-
-    def save(self, tag: str | None = None) -> Path:
-        version = tag or (self.trained_on or date.today()).isoformat()
-        path = self._root / version / "pipeline.joblib"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self, path)
-        latest = self._root / "latest"
-        if latest.exists() or latest.is_symlink():
-            latest.unlink()
-        try:
-            latest.symlink_to(path.parent, target_is_directory=True)
-        except OSError:
-            latest.write_text(str(path.parent), encoding="utf-8")
-        return path
-
-    @classmethod
-    def load(
-        cls,
-        name: str,
-        config: QoreConfig,
-        version: str = "latest",
-    ) -> ModelPipeline:
-        root = Path(config.intelligence.model_store_root) / name
-        if version == "latest":
-            latest = root / "latest"
-            if latest.is_symlink():
-                path = latest / "pipeline.joblib"
-            elif latest.exists():
-                path = Path(latest.read_text(encoding="utf-8")) / "pipeline.joblib"
-            else:
-                msg = f"No saved pipeline found for {name!r}"
-                raise FileNotFoundError(msg)
-        else:
-            path = root / version / "pipeline.joblib"
-        return joblib.load(path)
 
     def _extract_targets(
         self,
@@ -174,7 +176,11 @@ class ModelPipeline:
                 )
                 for horizon in self.model.horizons
             }
-            model = MultiHorizonRanker.from_config(self.config)
+            model = MultiHorizonRanker(
+                horizons=list(self.model.horizons),
+                weights=dict(self.model.weights),
+                model_params=dict(self.model.model_params),
+            )
             model.fit(train_x, train_targets, feature_columns)
 
             test_x = (
@@ -260,3 +266,14 @@ def _daily_ic_mean(
         return None
     value = daily.get_column("ic").mean()
     return None if value is None else float(value)
+
+
+def _training_window(frame: pl.DataFrame) -> dict[str, str] | None:
+    if "date" not in frame.columns or frame.is_empty():
+        return None
+    dates = frame.get_column("date")
+    start = dates.min()
+    end = dates.max()
+    if start is None or end is None:
+        return None
+    return {"start": start.isoformat(), "end": end.isoformat()}
