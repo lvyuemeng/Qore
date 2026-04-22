@@ -8,6 +8,7 @@ dependencies = [
     "qore-core",
     "qore-data",
     "qore-factor",
+    "qore-runner",
     "jieba>=0.42",
     "joblib>=1.4",
     "lightgbm>=4.6",

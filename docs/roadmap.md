@@ -2,331 +2,286 @@
 
 ## Goal
 
-Rewrite the repository into the `Qore` architecture defined in `docs/design.md`.
-This is a staged replacement of legacy `src/quant_trade`, not an incremental refactor.
+Rewrite the repository into the `Qore` architecture in `docs/design.md` and the
+library-first workflow in `docs/workflow.md`.
 
-## Document Map
+This remains a staged replacement of legacy `src/quant_trade`, not an
+incremental refactor.
 
-- `docs/design.md`: canonical architecture and design rules
-- `docs/roadmap.md`: rewrite status, milestones, phases, and next priorities
-- `docs/config.md`: current configuration structure and rules
-- `docs/workflow.md`: current library-first workflow and near-term workflow target
-- `docs/migration-inventory.md`: legacy-to-new mapping details
-
-## Rewrite Principles
+## Ground Rules
 
 1. New architecture first, compatibility second.
-2. No new product evolution in legacy `src/quant_trade` except migration support.
-3. Every new class that depends on paths or runtime parameters should expose `from_config()`.
-4. All new storage targets DuckDB + Parquet, never ArcticDB.
-5. Instrument-specific behavior uses `singledispatch`, not `isinstance` chains.
-6. Analytical pipelines stay lazy until an explicit collection point.
-7. `.ai/refs/akshare/` and legacy provider code are references, not runtime dependencies.
-8. Preserve formulas and endpoint knowledge, not legacy abstractions.
-9. Separate behavior from persisted data structures, especially in model export/import design.
+2. New active work lands in `crates/qore-*`, not legacy runtime paths.
+3. Analytical dataflow stays lazy until explicit execution boundaries.
+4. Prefer Polars and backend-native operators before Python loops.
+5. Use `singledispatch` or session-driven dispatch, not union-heavy branching.
+6. Config is runtime infrastructure only; trained state belongs in artifacts.
+7. Example strategy YAML is a reference input for future workflow or CLI layers,
+   not a data-crate-owned runtime surface.
 
 ## Current State
 
-Rewrite stage: late `Milestone B` and early `Milestone C`.
+- `qore-core`: usable typed config, instrument, calendar, homogeneous universe
+- `qore-data`: usable DuckDB + Parquet store, EastMoney fetcher, staged stock-selection pipeline
+- `qore-factor`: usable lazy factor pipeline and persistence baseline
+- `qore-intelligence`: usable ranking pipeline and cleaner artifact boundary
+- `qore-runner`: usable strategy/sizer/risk flow with generic overlays
+- `qore-backtest`: usable execution/accounting skeleton with metrics baseline
+- workflow reality: library-first composition works, but there is still no supported CLI or one-command operator path
 
-Current macro status:
+## Highest-Priority Missing Features
 
-- Foundation and workspace migration are complete enough for active crate-first work
-- Data, factor, intelligence, runner, and backtest layers all exist and can interact
-- One partial stock-ranking flow exists across the new crates
-- The system is still library-first and not yet an operator-ready product workflow
+These are the highest-priority gaps because they block the reference A-share
+workflow and the example small-cap strategy in `examples/strategy/small_cap_quality_enhanced_monthly.yaml`.
 
-What is working now:
+### From the small-cap strategy example
 
-- `qore-core`: typed config, calendar, instrument, and universe primitives are in place
-- `qore-data`: EastMoney-backed stock and fund data paths work through DuckDB + Parquet storage
-- `qore-factor`: lazy factor computation, normalization, evaluation, and persistence are present
-- `qore-intelligence`: baseline ranking model, validation IC recording, and news-score persistence exist
-- `qore-runner`: ranking flow, news blending, and volatility-aware sizing are partially integrated
-- `qore-backtest`: dispatched fills, engine skeleton, and metrics exist for a basic simulation loop
+- `debt_to_asset_ratio` belongs in `qore-factor`; the missing piece is raw balance-sheet coverage such as `total_liabilities`, not a data-layer precomputed ratio
+- blocked-trade logic is incomplete; current data does not expose `ask1_volume` / `bid1_volume` or equivalent order-book state
+- audit-opinion exclusion is still incomplete; raw opinion history and reusable event-state composition exist now, but downstream workflow enforcement is not finished
+- single-name capacity checking is still missing; the strategy needs reusable liquidity and capital checks such as target-position-to-amount and minimum traded-value guards
+- `st_warning` and delisting-risk handling are incomplete beyond the current coarse ST/suspension flags
+- alert routing is still missing, but it should be a general workflow alert surface rather than intelligence-specific `ai_record_alert`
+- intraday execution windows are low priority; end-of-day or next-day close-based daily execution is the preferred baseline
+- strategy YAML parsing and operator workflow assembly are missing from the future CLI/workflow layer
 
-What is not done yet:
+### From design and workflow
 
-- No official user-facing CLI or stable crate entrypoint contract
-- No single documented daily workflow that a user can run without code assembly
-- No production-grade EastMoney resilience evidence under sustained load
-- No completed benchmark-quality stock-ranking backtest on real historical datasets
-- No broader source expansion beyond the current EastMoney-first scope
-- Current intelligence design still mixes model behavior and persisted model state more than desired
-- Some current model-shape settings still live in config even though they should move into trained artifacts
-- Stock-universe-specific metadata is still thin for serious A-share workflows
+- no official CLI or stable user-facing entrypoint contract
+- no single documented daily workflow runnable without manual Python assembly
+- no benchmark-quality end-to-end A-share validation on real historical data
+- no production-grade EastMoney sustained-load proof or mature telemetry reporting
+- no complete operator-facing workflow that goes fetch -> factor -> model -> runner -> backtest from one supported entry
 
-## Next Step
-
-Immediate next step:
-
-- deliver one reproducible A-share stock workflow that wires fetch -> factor -> model -> runner -> backtest from documented config and commands
-- separate model artifact data, model registry behavior, and fit/predict pipeline behavior in the intelligence layer design
-
-After that:
-
-- harden EastMoney operational behavior
-- tighten runner/backtest realism
-- decide whether source expansion remains deferred or becomes active scope
-
-## Macro Plan
-
-Milestones are macro delivery checkpoints. Phases are implementation slices inside those milestones.
+## Milestones
 
 ### Milestone A - Foundation
 
-Goal: stop legacy-first development and establish the workspace, core types, and migration rules.
-
-Contains phases:
-
-- Phase 0: Freeze and prepare
-- Phase 1: Workspace bootstrap
-- Phase 2: Core domain rewrite
-
-Status: largely complete.
+- Goal: stable workspace, immutable core types, and shared development rules
+- Status: mostly complete
+- Remaining:
+  - keep tightening touched-module typing
+  - keep making `qore-core` APIs more method-owned and consistent
 
 ### Milestone B - Data to Signal
 
-Goal: make the new stack capable of producing usable inputs, factors, and ranking signals.
-
-Contains phases:
-
-- Phase 3: Data layer rewrite
-- Phase 4: Factor engine rewrite
-- Phase 5: Intelligence rewrite
-
-Status: mostly in place, but still missing production hardening and cleaner workflow packaging.
+- Goal: produce reliable datasets, factors, and ranking signals
+- Status: active
+- Blocking gaps:
+  - richer A-share metadata and event surfaces
+  - stronger EastMoney hardening and telemetry
+  - more factor coverage only where it supports the target stock workflow
+  - cleaner packaging from stored data to model-ready signals
 
 ### Milestone C - Portfolio to Backtest
 
-Goal: turn model outputs into target portfolios and evaluate them through the new backtest layer.
-
-Contains phases:
-
-- Phase 6: Runner rewrite
-- Phase 7: Backtest rewrite
-
-Status: started, with runnable skeletons but incomplete accounting realism and operator workflow.
-
-### Milestone D - Cutover
-
-Goal: move active usage fully onto the new crates and retire legacy runtime paths.
-
-Contains phases:
-
-- Phase 8: Migration cutover and legacy removal
-
-Status: not started.
-
-## Phase Status Snapshot
-
-Status key:
-
-- `[ ]` not started
-- `[-]` in progress
-- `[x]` completed
-
-| Phase | Scope | Status | Current summary |
-| --- | --- | --- | --- |
-| Phase 0 | Freeze and prepare | `[x]` | Design, migration stance, and `.ai/` reference workflow are established |
-| Phase 1 | Workspace bootstrap | `[x]` | uv workspace and crate layout exist; legacy package is no longer primary |
-| Phase 2 | Core domain rewrite | `[x]` | Typed config, instrument, calendar, and universe foundations are in place |
-| Phase 3 | Data layer rewrite | `[-]` | Dispatch and store exist; EastMoney and store hardening still remain |
-| Phase 4 | Factor engine rewrite | `[-]` | Lazy factor pipeline exists; factor breadth and tests still need expansion |
-| Phase 5 | Intelligence rewrite | `[-]` | Baseline ranking pipeline exists; broader validation and signal maturity remain |
-| Phase 6 | Runner rewrite | `[-]` | Ranking, news blending, and volatility-aware sizing exist; portfolio construction remains shallow |
-| Phase 7 | Backtest rewrite | `[-]` | Engine skeleton and metrics exist; deeper accounting realism remains |
-| Phase 8 | Cutover and legacy removal | `[ ]` | New crate flow is not yet the sole supported runtime path |
-
-## Phase Details
-
-### Phase 0 - Freeze and Prepare
-
-Macro goal: stop deepening the legacy architecture and prepare for parallel rewrite.
-
-Micro deliverables:
-
-- keep `docs/design.md` as the canonical target spec
-- keep `.ai/` as local reference material only
-- maintain migration inventory and legacy marking
-
-Status: complete.
-
-### Phase 1 - Workspace Bootstrap
-
-Macro goal: replace the single-package layout with a uv workspace monorepo.
-
-Micro deliverables:
-
-- workspace root uses `uv`
-- crate skeletons exist under `crates/`
-- shared lint, type, and test tooling is centralized
-
-Status: complete.
-
-### Phase 2 - Core Domain Rewrite (`qore-core`)
-
-Macro goal: establish immutable, typed platform foundations.
-
-Micro deliverables:
-
-- sealed instrument model
-- centralized `QoreConfig`
-- session-aware trading calendar
-- homogeneous universe model
-
-Status: complete enough for dependent crate work.
-
-### Phase 3 - Data Layer Rewrite (`qore-data`)
-
-Macro goal: rebuild ingestion and storage around typed protocols and Parquet-lake storage.
-
-Micro deliverables:
-
-- `singledispatch` fetch APIs by instrument type
-- EastMoney fetcher reimplemented without runtime `akshare`
-- DuckDB + Parquet store and dataset schema registry
-- validated read/write and named dataset views
-
-Current state:
-
-- filter validation, repeated-write deduplication, and several EastMoney datasets are already implemented
-- broader endpoint coverage and operational hardening remain unfinished
-- richer stock-universe metadata still remains unfinished, especially historical constituent, industry, and status views
-
-### Phase 4 - Factor Engine Rewrite (`qore-factor`)
-
-Macro goal: move feature engineering to composable lazy factor pipelines.
-
-Micro deliverables:
-
-- `Factor` protocol with `requires` and `produces`
-- lazy `FactorPipeline`
-- normalization, neutralization, evaluation, and persistence
-- initial useful factor families for ranking workflows
-
-Current state:
-
-- lazy computation, normalization, neutralization, evaluation, and `factor_scores` persistence exist
-- realized-volatility plus multiple quality, cashflow, and growth factors are already present
-- more factor breadth and stronger reconstruction/testing coverage remain
-
-### Phase 5 - Intelligence Rewrite (`qore-intelligence`)
-
-Macro goal: unify model ranking and news signals into one intelligence layer.
-
-Micro deliverables:
-
-- model normalizers and ranking model
-- fit/predict pipeline separated from artifact data and registry behavior
-- purged and walk-forward-style validation
-- optional signal modules and signal combination
-
-Current state:
-
-- baseline multi-horizon ranking pipeline exists and records validation IC during fitting
-- article-derived news scoring exists
-- current implementation still conflates some persisted model metadata with runtime pipeline behavior
-- current config still carries some model-shape settings that should migrate into exported artifacts
-- signal-stack maturity and broader validation coverage still remain
-
-### Phase 6 - Runner Rewrite (`qore-runner`)
-
-Macro goal: define strategy generation and portfolio construction independently from execution simulation.
-
-Micro deliverables:
-
-- strategy protocol and ranking-based strategy
-- screener and behavioral gating flows
-- sizers, risk manager, and `StrategyRunner`
-
-Current state:
-
-- runner now threads `news_scores` and factor-derived volatility into portfolio generation
-- broader strategy depth, risk behavior, and cleaner portfolio construction still remain
-
-### Phase 7 - Backtest Rewrite (`qore-backtest`)
-
-Macro goal: implement session-aware execution simulation and portfolio accounting.
-
-Micro deliverables:
-
-- dispatched `fill_order()` by instrument type
-- `BacktestEngine.from_config()`
-- portfolio/accounting result model and metrics
-
-Current state:
-
-- engine skeleton, dispatched fills, and metrics exist
-- deeper accounting realism and more complete integration still remain
-
-### Phase 8 - Migration Cutover and Legacy Removal
-
-Macro goal: move active workflows fully to `qore-*` crates and retire obsolete runtime paths.
-
-Micro deliverables:
-
-- create supported entrypoints on top of the new crates
-- remove ArcticDB runtime dependence
-- retire `src/quant_trade`, legacy scripts, and stale local artifacts
-- update docs to describe only the new architecture
-
-Status: not started.
-
-## Active Implementation Priorities
+- Goal: turn signals into portfolios and evaluate them realistically
+- Status: active
+- Blocking gaps:
+  - richer strategy families and operator-facing strategy assembly
+  - better risk behavior and diagnostics
+  - more realistic execution, pending fills, and accounting
+  - support for execution constraints required by the stock example workflow
+
+### Milestone D - Workflow and Cutover
+
+- Goal: move from library-first internals to a supported user-facing workflow and retire legacy paths
+- Status: not started
+- Blocking gaps:
+  - CLI or stable entrypoint contract
+  - supported config/workflow assembly layer
+  - cutover proof on real workflows
+  - legacy runtime retirement
+
+## Phases
+
+### Phase 0 - Freeze and prepare
+
+- Status: done
+- Scope: design target, migration boundary, AI reference rules
+- Remaining: maintenance only
+
+### Phase 1 - Workspace bootstrap
+
+- Status: done
+- Scope: uv workspace, crate layout, shared lint/type/test tooling
+- Remaining: maintenance only
+
+### Phase 2 - Core domain rewrite (`qore-core`)
+
+- Status: mostly done
+- Done:
+  - typed config
+  - session-aware calendar
+  - homogeneous universe
+  - generic typing improvements on touched APIs
+- Remaining:
+  - keep improving pipe-style universe ergonomics
+  - keep simplifying generic/session-driven dispatch surfaces
+
+### Phase 3 - Data layer rewrite (`qore-data`)
+
+- Status: active
+- Done:
+  - EastMoney stock and fund fetch baseline
+  - DuckDB + Parquet store
+  - request hardening helpers
+  - staged stock-selection pipeline owned by `StockSelectionPipeline`
+  - fundamentals schema and EastMoney parsing now cover raw `total_liabilities` for leverage-factor construction
+  - raw `stock_audit_opinions` dataset and EastMoney announcement-derived audit-opinion ingestion baseline
+  - lazy as-of audit-opinion state join on `StockSelectionPipeline`
+- High-priority remaining:
+  - raw balance-sheet coverage needed by factor-layer leverage fields such as `total_liabilities`
+  - richer status/event metadata for ST warning, delisting risk, and audit opinion
+  - order-book or equivalent blocked-trade data for limit-up and limit-down execution filters
+  - reusable daily-liquidity and capital-capacity inputs for per-stock capacity checks
+  - better announcement and event coverage for strategy filters and alerting
+  - clearer store semantics for analytical scans vs filtered retrieval
+  - sustained-load EastMoney validation and usable telemetry
+
+### Phase 4 - Factor engine rewrite (`qore-factor`)
+
+- Status: active
+- Done:
+  - lazy factor pipeline
+  - normalization and evaluation baseline
+  - persistence into `factor_scores`
+  - event-aware audit-opinion factor composition baseline, kept independent of runner/backtest policy
+  - reusable capacity-metric factor composition from daily liquidity inputs
+  - generic alert-condition frame builder from workflow inputs, independent of intelligence subscribers
+- High-priority remaining:
+  - add only workflow-relevant factors and derived fields
+  - support leverage and event-aware factors required by the stock example, including `debt_to_asset_ratio` from raw liabilities and assets
+  - support reusable capacity metrics and penalties derived from daily liquidity inputs, independent of runner policy
+  - improve reconstruction and test coverage
+
+### Phase 5 - Intelligence rewrite (`qore-intelligence`)
+
+- Status: active
+- Done:
+  - baseline ranking pipeline
+  - artifact manifest/payload/runtime cleanup
+  - news-score persistence baseline
+- High-priority remaining:
+  - lighter metadata inspection separate from payload loading
+  - broader validation and signal-stack maturity
+  - generic workflow alert sinks and event escalation surfaces that intelligence may consume but does not exclusively own
+
+### Phase 6 - Runner rewrite (`qore-runner`)
+
+- Status: active
+- Done:
+  - generic strategy boundary
+  - shared sizing path
+  - generic overlay inputs
+  - baseline diagnostics
+- High-priority remaining:
+  - richer stock strategy assembly beyond raw ranking inputs
+  - stronger rule-based exits and exclusion handling once event and capacity overlays are composed upstream
+  - operator-facing strategy config integration at the workflow or CLI layer
+
+### Phase 7 - Backtest rewrite (`qore-backtest`)
+
+- Status: active
+- Done:
+  - session-dispatched fills baseline
+  - cached daily reads
+  - accounting loop and metrics baseline
+- High-priority remaining:
+  - pending-fill and retry realism
+  - execution windows for stock-session workflows after day-level execution support is solid
+  - better diagnostics around blocked trades, retries, and exits
+
+### Phase 8 - Workflow and cutover
+
+- Status: not started
+- Scope:
+  - supported example entrypoints
+  - config parsing above crate internals
+  - CLI or workflow package boundary
+  - legacy retirement
+- Remaining: all deliverables
+
+## Active Priorities
 
 ### Now
 
-- build one supported end-to-end A-share example workflow
-- redesign intelligence persistence boundary so model artifact data is separate from model loading/saving behavior
-- document exact config, datasets, and command sequence
-- verify the current crate chain on one benchmark universe
-- add the stock-universe information needed for credible pool definition and category-aware evaluation
+- finish the stock data surfaces required by the small-cap monthly strategy
+- finish the factor surfaces required by the small-cap monthly strategy, with derived leverage metrics computed in `qore-factor` instead of stored as raw datasets
+- add workflow-composable capacity checks and generic alert surfaces before deepening runner-specific policy
+- keep the stock-selection API method-owned and remove helper wrappers
+- document the workflow boundary clearly: crates provide primitives, examples show composition, future CLI owns strategy/config parsing
+- validate one reproducible A-share workflow on real historical data
+- harden EastMoney with operational telemetry and sustained-load evidence
+
+## Priority Checklists
+
+### Checklist 1 - `debt_to_asset_ratio`
+
+- `qore-data`: add raw `total_liabilities` coverage to point-in-time fundamentals [done]
+- `qore-factor`: compute `debt_to_asset_ratio = total_liabilities / total_assets`
+- `qore-factor`: keep the ratio lazy and reconstructible from raw fields
+- `qore-runner` or workflow layer: consume the factor as a normal selection input instead of expecting a precomputed store field
+
+### Checklist 2 - audit-opinion exclusion
+
+Concrete implementation plan:
+
+1. `qore-data`
+   - add a persisted `stock_audit_opinions` dataset with at least `symbol`, `report_date`, `announce_date`, `opinion`, `opinion_code`, and source metadata [done]
+   - implement EastMoney endpoint coverage or equivalent announcement-derived parsing for audit opinions [done: announcement-derived baseline]
+   - keep raw opinion history point-in-time, not prefiltered into strategy-specific flags
+2. `qore-data` universe/event surface
+   - add a lazy as-of resolver that derives the latest known adverse opinion state per symbol as of the selection date [done]
+   - expose a reusable event/status join for audit-opinion-driven exclusions without hardcoding one strategy [done: selection-pipeline join baseline]
+3. `qore-factor` / workflow layer
+   - if needed, expose event-aware boolean or age-based features such as `has_adverse_audit_opinion` and `adverse_audit_opinion_age_days` [done: factor composition baseline]
+   - keep these derived fields outside raw dataset storage [done]
+4. workflow layer
+   - compose audit-opinion exclusion windows, capacity checks, and alert conditions before runner/backtest consumption
+   - keep event semantics, alert semantics, and stock-specific thresholds outside runner/backtest core contracts
+5. `qore-runner`
+   - do not own event semantics; only consume already-composed generic overlays when workflow layers choose to provide them
+   - if needed later, support rule-based universe exclusion or forced exit inputs from generic event/status overlays without embedding strategy-specific event details into runner APIs
+6. `qore-backtest`
+   - enforce next-open liquidation and exclusion persistence in execution/accounting flow
+   - add diagnostics so adverse-opinion exits and re-entry blocks are visible in results
+
+### Checklist 3 - stock capacity and general alerts
+
+Concrete implementation plan:
+
+1. `qore-data`
+   - expose reusable daily liquidity inputs such as `amount` history and possibly turnover-derived summaries needed for stock-level capital checks
+   - keep these as generic market-state inputs, not strategy-specific capacity flags
+2. `qore-factor` / workflow layer
+   - derive capacity metrics such as `avg_amount_20d`, `target_position_to_daily_amount`, and capacity penalties from workflow inputs [done: factor composition baseline]
+   - derive general alert condition frames from price/turnover/event inputs without coupling alerts to intelligence consumers [done: generic alert frame baseline]
+3. workflow layer
+   - compose index-universe selection, factor filters, event exclusions, capacity checks, and alert rules into one reusable daily strategy assembly path
+   - define generic alert actions such as `emit_alert` or `record_alert`, leaving downstream subscribers optional
+4. `qore-intelligence`
+   - optionally subscribe to generic alerts for context enrichment, but do not own the alert contract
+5. `qore-runner` / `qore-backtest`
+   - consume capacity-checked universes and generic overlays after workflow composition, without embedding stock-capacity semantics in their core APIs
 
 ### Next
 
-- add EastMoney resilience testing, retry budgeting, and crawl telemetry
-- improve factor coverage only where it directly strengthens the current ranking flow
-- tighten runner and backtest realism around sizing, accounting, and diagnostics
-- extend stock-universe metadata with useful A-share-specific information from EastMoney-reimplemented endpoints
+- expand only the factor and event surfaces needed by the target workflow
+- strengthen runner risk behavior and backtest realism
+- move workflow/config assembly into a dedicated operator-facing layer
 
 ### Later
 
-- decide explicit source expansion scope for Yahoo and crypto markets
-- perform cutover and legacy removal after the new path is genuinely usable
-
-## Legacy Mapping
-
-| Legacy area | Status | Target home |
-| --- | --- | --- |
-| `src/quant_trade/transform.py` | retire | none |
-| `src/quant_trade/client/eastmoney.py` | reverse engineer and rewrite | `qore-data/fetcher/eastmoney.py` |
-| `src/quant_trade/provider/akshare.py` | do not port directly | reference only via `.ai/refs/akshare/` |
-| `src/quant_trade/provider/baostock.py` | optional future reference | possible future source adapter |
-| `src/quant_trade/config/arctic.py` | retire | `qore-data/store/duckdb.py` |
-| `src/quant_trade/feature/process.py` | formula extraction only | `qore-factor/*` |
-| `src/quant_trade/feature/store.py` | retire | split across `qore-data` and `qore-core` |
-| `src/quant_trade/model/process.py` | selective reuse | `qore-intelligence/model/*` |
-| `src/quant_trade/model/lgb.py` | selective reuse | `qore-intelligence/model/*` |
-| `src/quant_trade/model/store.py` | rewrite | `qore-intelligence/model/pipeline.py` |
-| `scripts/smoke_train.py` | retire | crate CLI / examples |
-
-## Risks
-
-- directly migrating legacy classes would drag old abstractions into the new design
-- ArcticDB compatibility pressure could weaken the rewrite boundary
-- runtime reuse of AkShare would violate the target contract
-- eager legacy assumptions may be hidden inside old factor pipelines and need lazy re-expression
-- early skeleton success can mask the remaining operator and production gaps
+- decide explicit source expansion scope
+- cut over active workflows fully to supported new entrypoints
 
 ## Definition of Done
 
 The rewrite is complete when:
 
-- repository structure matches the monorepo design
-- all active code paths run through `qore-*` crates rather than `quant_trade`
-- storage is DuckDB + Parquet rather than ArcticDB
-- instrument-specific behavior is expressed via `singledispatch`
-- model training and loading are config-derived and versioned
-- one full stock-ranking workflow runs end to end through the new stack
+- active workflows run through `qore-*` crates only
+- one supported A-share workflow runs end to end from a stable entrypoint
+- stock example strategy requirements are either implemented or explicitly rejected by the supported workflow contract
+- EastMoney is operationally hardened with evidence, not just local tests
 - legacy `src/quant_trade` is removed or archived out of the active path

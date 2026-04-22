@@ -5,7 +5,12 @@ from datetime import date
 import polars as pl
 import pytest
 from qore_core import DerivativeInstrument, FundInstrument, StockInstrument
-from qore_data.fetch import fetch_daily, fetch_minute, fetch_profile
+from qore_data.fetch import (
+    fetch_audit_opinions,
+    fetch_daily,
+    fetch_minute,
+    fetch_profile,
+)
 
 
 class StubFundSource:
@@ -34,6 +39,26 @@ class StubStockSource:
             {
                 "symbol": [inst.symbol],
                 "as_of": [as_of],
+            }
+        )
+
+    async def audit_opinions(
+        self,
+        inst: StockInstrument,
+        start: date,
+        end: date,
+    ) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "symbol": [inst.symbol],
+                "report_date": [date(2025, 12, 31)],
+                "announce_date": [end],
+                "opinion": ["否定意见"],
+                "opinion_code": ["adverse"],
+                "source_notice_type": ["财务报告"],
+                "title": ["2025年年度审计报告(否定意见)"],
+                "art_code": ["AUD-1"],
+                "url": [f"https://example.test/{start.isoformat()}"],
             }
         )
 
@@ -97,3 +122,16 @@ async def test_fetch_profile_routes_stock_to_stock_profile() -> None:
     inst = StockInstrument(symbol="600519.SH", exchange="SH", industry="food")
     result = await fetch_profile(inst, date(2026, 1, 31), StubStockSource())
     assert result.get_column("symbol").to_list() == ["600519.SH"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_audit_opinions_routes_stock_source() -> None:
+    inst = StockInstrument(symbol="600519.SH", exchange="SH", industry="food")
+    result = await fetch_audit_opinions(
+        inst,
+        date(2026, 1, 1),
+        date(2026, 4, 30),
+        StubStockSource(),
+    )
+
+    assert result.get_column("opinion_code").to_list() == ["adverse"]

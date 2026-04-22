@@ -6,7 +6,7 @@ from pathlib import Path
 import joblib
 from qore_core.config import QoreConfig
 
-from qore_intelligence.model.artifact import ModelArtifact
+from qore_intelligence.model.artifact import TrainedModelArtifact
 
 
 @dataclass(slots=True)
@@ -17,13 +17,20 @@ class ModelRegistry:
     def from_config(cls, config: QoreConfig) -> ModelRegistry:
         return cls(root=Path(config.intelligence.model_store_root))
 
-    def save(self, artifact: ModelArtifact, version: str | None = None) -> Path:
-        resolved_version = version or artifact.trained_at.date().isoformat()
-        path = self.root / artifact.model_name / resolved_version / "artifact.joblib"
+    def save(self, artifact: TrainedModelArtifact, version: str | None = None) -> Path:
+        resolved_version = (
+            version or artifact.manifest.training_metadata.trained_at.date().isoformat()
+        )
+        path = (
+            self.root
+            / artifact.manifest.model_name
+            / resolved_version
+            / "artifact.joblib"
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(artifact, path)
 
-        latest = self.root / artifact.model_name / "latest"
+        latest = self.root / artifact.manifest.model_name / "latest"
         if latest.exists() or latest.is_symlink():
             latest.unlink()
         try:
@@ -32,7 +39,7 @@ class ModelRegistry:
             latest.write_text(str(path.parent), encoding="utf-8")
         return path
 
-    def load(self, model_name: str, version: str = "latest") -> ModelArtifact:
+    def load(self, model_name: str, version: str = "latest") -> TrainedModelArtifact:
         root = self.root / model_name
         if version == "latest":
             latest = root / "latest"

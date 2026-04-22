@@ -1,15 +1,72 @@
 from __future__ import annotations
 
 import asyncio
-import random
+import re
 from collections.abc import Callable
 from datetime import date
-from typing import Any
+from typing import Any, Literal, cast
 
 import httpx
 import polars as pl
 from qore_core.config import QoreConfig
 from qore_core.instrument import FundInstrument, StockInstrument
+
+from qore_data.fetcher.http import (
+    AsyncClosable,
+    HardenedJsonFetcher,
+    HeaderProfile,
+    JsonFetcher,
+    RequestHardening,
+    RequestPolicy,
+    RequestSpec,
+    RequestTelemetry,
+    ResponseGuard,
+    TelemetryReadable,
+)
+
+
+class EastMoneyBlockedError(RuntimeError):
+    pass
+
+
+class EastMoneyResponseGuard(ResponseGuard):
+    def __init__(
+        self,
+        anti_crawl_status_codes: frozenset[int],
+        anti_crawl_markers: tuple[str, ...],
+    ) -> None:
+        self._anti_crawl_status_codes = anti_crawl_status_codes
+        self._anti_crawl_markers = anti_crawl_markers
+
+    def should_retry(self, exc: BaseException) -> bool:
+        if isinstance(exc, EastMoneyBlockedError):
+            return True
+        if isinstance(exc, RuntimeError):
+            return False
+        if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, ValueError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_error = cast(httpx.HTTPStatusError, exc)
+            return status_error.response.status_code in {
+                408,
+                409,
+                425,
+                429,
+                500,
+                502,
+                503,
+                504,
+            }
+        return False
+
+    def is_blocked_response(self, response: httpx.Response) -> bool:
+        if response.status_code in self._anti_crawl_status_codes:
+            return True
+        lowered = response.text.lower()
+        return any(marker in lowered for marker in self._anti_crawl_markers)
+
+    def blocked_error(self, endpoint: str) -> BaseException:
+        return EastMoneyBlockedError(f"EastMoney anti-crawling response for {endpoint}")
 
 
 class EastMoneyFetcher:
@@ -29,6 +86,45 @@ class EastMoneyFetcher:
         "income": "RPT_DMSK_FN_INCOME",
         "cashflow": "RPT_DMSK_FN_CASHFLOW",
     }
+    _HEADER_PROFILES = (
+        HeaderProfile(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+            ),
+            accept_language="zh-CN,zh;q=0.9,en;q=0.6",
+            cache_control="no-cache",
+            pragma="no-cache",
+        ),
+        HeaderProfile(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 Chrome/123.0.0.0 Safari/537.36"
+            ),
+            accept_language="zh-CN,zh;q=0.9,en-US;q=0.7,en;q=0.5",
+            cache_control="max-age=0",
+            pragma="no-cache",
+        ),
+        HeaderProfile(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36"
+            ),
+            accept_language="zh-CN,zh;q=0.85,en;q=0.6",
+            cache_control="no-store",
+            pragma="no-cache",
+        ),
+    )
+    _ANTI_CRAWL_STATUS_CODES = frozenset({403, 412, 429})
+    _ANTI_CRAWL_MARKERS = (
+        "访问过于频繁",
+        "访问受限",
+        "请求过于频繁",
+        "请稍后再试",
+        "captcha",
+        "forbidden",
+        "deny",
+    )
     _EMPTY_SCHEMA = {
         "stock_daily": {
             "date": pl.Date,
@@ -84,6 +180,17 @@ class EastMoneyFetcher:
             "art_code": pl.String,
             "url": pl.String,
         },
+        "audit_opinions": {
+            "symbol": pl.String,
+            "report_date": pl.Date,
+            "announce_date": pl.Date,
+            "opinion": pl.String,
+            "opinion_code": pl.String,
+            "source_notice_type": pl.String,
+            "title": pl.String,
+            "art_code": pl.String,
+            "url": pl.String,
+        },
         "stock_profile": {
             "as_of": pl.Date,
             "symbol": pl.String,
@@ -98,34 +205,74 @@ class EastMoneyFetcher:
             "float_shares": pl.Float64,
             "is_st": pl.Boolean,
         },
+        "fundamentals": {
+            "report_date": pl.Date,
+            "announce_date": pl.Date,
+            "symbol": pl.String,
+            "pe_ttm": pl.Float64,
+            "pb": pl.Float64,
+            "ps_ttm": pl.Float64,
+            "ev_ebitda": pl.Float64,
+            "roe": pl.Float64,
+            "roa": pl.Float64,
+            "gross_margin": pl.Float64,
+            "revenue": pl.Float64,
+            "net_income": pl.Float64,
+            "total_liabilities": pl.Float64,
+            "total_assets": pl.Float64,
+            "operating_cashflow": pl.Float64,
+        },
     }
 
-    def __init__(self, concurrency: int, delay_min: float, delay_max: float) -> None:
-        self._sem = asyncio.Semaphore(concurrency)
-        self._delay = (delay_min, delay_max)
-        self._client = httpx.AsyncClient(
-            http2=True,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "Referer": "https://finance.eastmoney.com/",
-                "Accept-Language": "zh-CN,zh;q=0.9",
-            },
-            timeout=15.0,
-        )
+    def __init__(self, json_fetcher: JsonFetcher) -> None:
+        self._json_fetcher = json_fetcher
 
     @classmethod
     def from_config(cls, config: QoreConfig) -> EastMoneyFetcher:
-        return cls(
-            concurrency=config.data.eastmoney_concurrency,
+        policy = RequestPolicy(
             delay_min=config.data.eastmoney_delay_min,
             delay_max=config.data.eastmoney_delay_max,
+            max_retries=config.data.eastmoney_max_retries,
+            retry_budget=config.data.eastmoney_retry_budget,
+            retry_backoff_min=config.data.eastmoney_retry_backoff_min,
+            retry_backoff_max=config.data.eastmoney_retry_backoff_max,
         )
+        hardening = RequestHardening(
+            telemetry=RequestTelemetry(),
+            header_profiles=cls._HEADER_PROFILES,
+            cooldown_min=config.data.eastmoney_cooldown_min,
+            cooldown_max=config.data.eastmoney_cooldown_max,
+        )
+        client = httpx.AsyncClient(
+            http2=True,
+            headers={"Referer": "https://finance.eastmoney.com/"},
+            timeout=config.data.eastmoney_timeout,
+        )
+        fetcher = HardenedJsonFetcher(
+            client=client,
+            semaphore=asyncio.Semaphore(config.data.eastmoney_concurrency),
+            policy=policy,
+            hardening=hardening,
+            guard=EastMoneyResponseGuard(
+                anti_crawl_status_codes=cls._ANTI_CRAWL_STATUS_CODES,
+                anti_crawl_markers=cls._ANTI_CRAWL_MARKERS,
+            ),
+        )
+        return cls(fetcher)
 
     async def close(self) -> None:
-        await self._client.aclose()
+        if isinstance(self._json_fetcher, AsyncClosable):
+            await self._json_fetcher.close()
+
+    def telemetry_snapshot(self) -> dict[str, dict[str, float | int]]:
+        if isinstance(self._json_fetcher, TelemetryReadable):
+            return self._json_fetcher.telemetry_snapshot()
+        return {}
+
+    def telemetry_frame(self) -> pl.DataFrame:
+        if isinstance(self._json_fetcher, TelemetryReadable):
+            return self._json_fetcher.telemetry_frame()
+        return RequestTelemetry().frame()
 
     async def stock_daily(
         self,
@@ -133,19 +280,22 @@ class EastMoneyFetcher:
         start: date,
         end: date,
     ) -> pl.DataFrame:
-        payload = await self._request_json(
-            self._KLINE_URL,
-            params={
-                "fields1": "f1,f2,f3,f4,f5,f6",
-                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
-                "ut": "7eea3edcaed734bea9cbfc24409ed989",
-                "klt": "101",
-                "fqt": "0",
-                "secid": self._stock_secid(inst),
-                "beg": start.strftime("%Y%m%d"),
-                "end": end.strftime("%Y%m%d"),
-            },
-            referer=f"https://quote.eastmoney.com/{inst.symbol.lower()}.html",
+        payload = await self._json_request(
+            RequestSpec(
+                endpoint="stock_daily",
+                url=self._KLINE_URL,
+                params={
+                    "fields1": "f1,f2,f3,f4,f5,f6",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
+                    "ut": "7eea3edcaed734bea9cbfc24409ed989",
+                    "klt": "101",
+                    "fqt": "0",
+                    "secid": self._stock_secid(inst),
+                    "beg": start.strftime("%Y%m%d"),
+                    "end": end.strftime("%Y%m%d"),
+                },
+                referer=f"https://quote.eastmoney.com/{inst.symbol.lower()}.html",
+            )
         )
         data = payload.get("data") or {}
         klines = data.get("klines") or []
@@ -173,7 +323,7 @@ class EastMoneyFetcher:
                     and pct_change <= -inst.price_limit_pct * 100.0 + 1e-6,
                 }
             )
-        return pl.DataFrame(rows).select(self._empty_frame("stock_daily").columns)
+        return self._frame_from_rows("stock_daily", rows)
 
     async def fundamentals(
         self,
@@ -216,6 +366,7 @@ class EastMoneyFetcher:
             ),
             "revenue": self._to_float(income_row.get("TOTAL_OPERATE_INCOME")),
             "net_income": self._to_float(income_row.get("NETPROFIT")),
+            "total_liabilities": self._to_float(balance_row.get("TOTAL_LIABILITIES")),
             "total_assets": self._to_float(balance_row.get("TOTAL_ASSETS")),
             "operating_cashflow": self._to_float(cashflow_row.get("NETCASH_OPERATE")),
         }
@@ -224,7 +375,7 @@ class EastMoneyFetcher:
             for column in ["report_date", "announce_date", "symbol", *fields]
             if column in row
         ]
-        return pl.DataFrame([row]).select(selected)
+        return self._frame_from_records([row], columns=selected)
 
     async def index_constituents(
         self,
@@ -245,7 +396,11 @@ class EastMoneyFetcher:
             "fs": f"i:{prefix}.{symbol}",
             "fields": "f12,f14,f100,f13",
         }
-        payload = await self._request_json(self._CONSTITUENT_URL, params=params)
+        payload = await self._json_request(
+            RequestSpec(
+                endpoint="index_constituents", url=self._CONSTITUENT_URL, params=params
+            )
+        )
         diff = ((payload.get("data") or {}).get("diff")) or []
         instruments: list[StockInstrument] = []
         for row in diff:
@@ -265,13 +420,16 @@ class EastMoneyFetcher:
         inst: StockInstrument,
         as_of: date,
     ) -> pl.DataFrame:
-        payload = await self._request_json(
-            self._STOCK_INFO_URL,
-            params=self._stock_profile_params(inst),
-            referer=(
-                "https://quote.eastmoney.com/concept/"
-                f"{inst.exchange.lower()}{self._symbol_digits(inst.symbol)}.html?from=classic"
-            ),
+        payload = await self._json_request(
+            RequestSpec(
+                endpoint="stock_profile",
+                url=self._STOCK_INFO_URL,
+                params=self._stock_profile_params(inst),
+                referer=(
+                    "https://quote.eastmoney.com/concept/"
+                    f"{inst.exchange.lower()}{self._symbol_digits(inst.symbol)}.html?from=classic"
+                ),
+            )
         )
         data = payload.get("data") or {}
         if not data:
@@ -291,7 +449,7 @@ class EastMoneyFetcher:
             "float_shares": self._to_float(data.get("f85")),
             "is_st": short_name.startswith(("ST", "*ST")),
         }
-        return pl.DataFrame([row]).select(self._empty_frame("stock_profile").columns)
+        return self._frame_from_rows("stock_profile", [row])
 
     async def fund_nav(
         self,
@@ -300,7 +458,8 @@ class EastMoneyFetcher:
         end: date,
     ) -> pl.DataFrame:
         pages = await self._fetch_paginated_json(
-            self._FUND_NAV_URL,
+            endpoint="fund_nav",
+            url=self._FUND_NAV_URL,
             build_params=lambda page: self._fund_nav_params(
                 inst.symbol,
                 start,
@@ -310,31 +469,27 @@ class EastMoneyFetcher:
             total_count=lambda payload: int(payload.get("TotalCount") or 0),
             page_size=200,
             referer=f"https://fundf10.eastmoney.com/jjjz_{inst.symbol}.html",
-            extra_headers={"Host": "api.fund.eastmoney.com"},
+            headers={"Host": "api.fund.eastmoney.com"},
         )
 
         rows: list[dict[str, Any]] = []
-        for page in pages:
-            records = ((page.get("Data") or {}).get("LSJZList")) or []
-            for item in records:
-                nav_date = date.fromisoformat(str(item.get("FSRQ")))
-                if nav_date < start or nav_date > end:
-                    continue
-                daily_return = self._to_float(item.get("JZZZL"))
-                rows.append(
-                    {
-                        "date": nav_date,
-                        "symbol": inst.symbol,
-                        "nav": self._to_float(item.get("DWJZ")),
-                        "acc_nav": self._to_float(item.get("LJJZ")),
-                        "daily_return": None
-                        if daily_return is None
-                        else daily_return / 100.0,
-                    }
-                )
-        if not rows:
-            return self._empty_frame("fund_nav")
-        return pl.DataFrame(rows).sort("date")
+        for item in self._page_records(pages, "Data", "LSJZList"):
+            nav_date = date.fromisoformat(str(item.get("FSRQ")))
+            if nav_date < start or nav_date > end:
+                continue
+            daily_return = self._to_float(item.get("JZZZL"))
+            rows.append(
+                {
+                    "date": nav_date,
+                    "symbol": inst.symbol,
+                    "nav": self._to_float(item.get("DWJZ")),
+                    "acc_nav": self._to_float(item.get("LJJZ")),
+                    "daily_return": None
+                    if daily_return is None
+                    else daily_return / 100.0,
+                }
+            )
+        return self._frame_from_rows("fund_nav", rows, sort_by="date")
 
     async def fund_holdings(
         self,
@@ -342,7 +497,8 @@ class EastMoneyFetcher:
         report_date: date,
     ) -> pl.DataFrame:
         pages = await self._fetch_paginated_json(
-            self._FINANCIAL_URL,
+            endpoint="fund_holdings",
+            url=self._FINANCIAL_URL,
             build_params=lambda page: self._fund_holdings_params(
                 inst.symbol,
                 report_date,
@@ -358,41 +514,36 @@ class EastMoneyFetcher:
             ),
         )
         rows: list[dict[str, Any]] = []
-        for page in pages:
-            records = ((page.get("result") or {}).get("data")) or []
-            for item in records:
-                code = str(item.get("SECURITY_CODE") or "").strip()
-                if not code:
-                    continue
-                rows.append(
-                    {
-                        "report_date": report_date,
-                        "symbol": inst.symbol,
-                        "stock_symbol": code,
-                        "stock_name": str(item.get("SECURITY_NAME_ABBR") or ""),
-                        "shares": self._to_float(item.get("HOLD_SHARES")),
-                        "market_value": self._to_float(item.get("HOLD_MV")),
-                        "total_share_ratio": self._to_float(
-                            item.get("TOTAL_SHARES_RATIO")
-                        ),
-                        "float_share_ratio": self._to_float(
-                            item.get("FREE_SHARES_RATIO")
-                        ),
-                    }
-                )
-        if not rows:
-            return self._empty_frame("fund_holdings")
-        return pl.DataFrame(rows).select(self._empty_frame("fund_holdings").columns)
+        for item in self._page_records(pages, "result", "data"):
+            code = str(item.get("SECURITY_CODE") or "").strip()
+            if not code:
+                continue
+            rows.append(
+                {
+                    "report_date": report_date,
+                    "symbol": inst.symbol,
+                    "stock_symbol": code,
+                    "stock_name": str(item.get("SECURITY_NAME_ABBR") or ""),
+                    "shares": self._to_float(item.get("HOLD_SHARES")),
+                    "market_value": self._to_float(item.get("HOLD_MV")),
+                    "total_share_ratio": self._to_float(item.get("TOTAL_SHARES_RATIO")),
+                    "float_share_ratio": self._to_float(item.get("FREE_SHARES_RATIO")),
+                }
+            )
+        return self._frame_from_rows("fund_holdings", rows)
 
     async def analyst_forecast(
         self,
         inst: StockInstrument,
         as_of: date,
     ) -> pl.DataFrame:
-        payload = await self._request_json(
-            self._ANALYST_URL,
-            params=self._analyst_forecast_params(inst),
-            referer="https://data.eastmoney.com/report/profitforecast.jshtml",
+        payload = await self._json_request(
+            RequestSpec(
+                endpoint="analyst_forecast",
+                url=self._ANALYST_URL,
+                params=self._analyst_forecast_params(inst),
+                referer="https://data.eastmoney.com/report/profitforecast.jshtml",
+            )
         )
         records = ((payload.get("result") or {}).get("data")) or []
         matched = self._match_security_code(records, inst.symbol)
@@ -414,7 +565,7 @@ class EastMoneyFetcher:
             "eps_year3": year_columns[2],
             "eps_year4": year_columns[3],
         }
-        return pl.DataFrame([row]).select(self._empty_frame("analyst_forecast").columns)
+        return self._frame_from_rows("analyst_forecast", [row])
 
     async def announcements(
         self,
@@ -423,7 +574,8 @@ class EastMoneyFetcher:
         end: date,
     ) -> pl.DataFrame:
         pages = await self._fetch_paginated_json(
-            self._ANNOUNCE_URL,
+            endpoint="announcements",
+            url=self._ANNOUNCE_URL,
             build_params=lambda page: self._announcement_params(
                 inst, start, end, page_index=page
             ),
@@ -434,62 +586,94 @@ class EastMoneyFetcher:
             referer=f"https://data.eastmoney.com/notices/stock/{self._symbol_digits(inst.symbol)}.html",
         )
         rows: list[dict[str, Any]] = []
-        for page in pages:
-            records = ((page.get("data") or {}).get("list")) or []
-            for item in records:
-                codes = item.get("codes") or []
-                matched = next(
-                    (
-                        code
-                        for code in codes
-                        if str(code.get("stock_code", "")).zfill(6)
-                        == self._symbol_digits(inst.symbol)
-                    ),
-                    None,
-                )
-                if matched is None:
-                    continue
-                notice_date = self._parse_date(item.get("notice_date"))
-                if notice_date is None or notice_date < start or notice_date > end:
-                    continue
-                columns = item.get("columns") or []
-                first_column = columns[0] if columns else {}
-                art_code = str(item.get("art_code") or "")
-                rows.append(
-                    {
-                        "symbol": inst.symbol,
-                        "short_name": str(matched.get("short_name") or ""),
-                        "title": str(item.get("title") or ""),
-                        "notice_type": str(first_column.get("column_name") or ""),
-                        "notice_date": notice_date,
-                        "art_code": art_code,
-                        "url": f"https://data.eastmoney.com/notices/detail/{self._symbol_digits(inst.symbol)}/{art_code}.html",
-                    }
-                )
-        if not rows:
-            return self._empty_frame("announcements")
-        return pl.DataFrame(rows).select(self._empty_frame("announcements").columns)
-
-    async def _request_json(
-        self,
-        url: str,
-        *,
-        params: dict[str, Any],
-        referer: str | None = None,
-        extra_headers: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        headers: dict[str, str] = {}
-        if referer is not None:
-            headers["Referer"] = referer
-        if extra_headers is not None:
-            headers.update(extra_headers)
-        async with self._sem:
-            await asyncio.sleep(random.uniform(*self._delay))
-            response = await self._client.get(
-                url, params=params, headers=headers or None
+        for item in self._page_records(pages, "data", "list"):
+            codes = item.get("codes") or []
+            matched = next(
+                (
+                    code
+                    for code in codes
+                    if str(code.get("stock_code", "")).zfill(6)
+                    == self._symbol_digits(inst.symbol)
+                ),
+                None,
             )
-        response.raise_for_status()
-        return response.json()
+            if matched is None:
+                continue
+            notice_date = self._parse_date(item.get("notice_date"))
+            if notice_date is None or notice_date < start or notice_date > end:
+                continue
+            columns = item.get("columns") or []
+            first_column = columns[0] if columns else {}
+            art_code = str(item.get("art_code") or "")
+            rows.append(
+                {
+                    "symbol": inst.symbol,
+                    "short_name": str(matched.get("short_name") or ""),
+                    "title": str(item.get("title") or ""),
+                    "notice_type": str(first_column.get("column_name") or ""),
+                    "notice_date": notice_date,
+                    "art_code": art_code,
+                    "url": f"https://data.eastmoney.com/notices/detail/{self._symbol_digits(inst.symbol)}/{art_code}.html",
+                }
+            )
+        return self._frame_from_rows("announcements", rows)
+
+    async def audit_opinions(
+        self,
+        inst: StockInstrument,
+        start: date,
+        end: date,
+    ) -> pl.DataFrame:
+        pages = await self._fetch_paginated_json(
+            endpoint="audit_opinions",
+            url=self._ANNOUNCE_URL,
+            build_params=lambda page: self._announcement_params(
+                inst, start, end, page_index=page
+            ),
+            total_count=lambda payload: int(
+                ((payload.get("data") or {}).get("total_hits")) or 0
+            ),
+            page_size=100,
+            referer=f"https://data.eastmoney.com/notices/stock/{self._symbol_digits(inst.symbol)}.html",
+        )
+        rows: list[dict[str, Any]] = []
+        for item in self._page_records(pages, "data", "list"):
+            codes = item.get("codes") or []
+            matched = next(
+                (
+                    code
+                    for code in codes
+                    if str(code.get("stock_code", "")).zfill(6)
+                    == self._symbol_digits(inst.symbol)
+                ),
+                None,
+            )
+            if matched is None:
+                continue
+            notice_date = self._parse_date(item.get("notice_date"))
+            if notice_date is None or notice_date < start or notice_date > end:
+                continue
+            columns = item.get("columns") or []
+            first_column = columns[0] if columns else {}
+            title = str(item.get("title") or "")
+            opinion = self._audit_opinion_from_title(title)
+            if opinion is None:
+                continue
+            art_code = str(item.get("art_code") or "")
+            rows.append(
+                {
+                    "symbol": inst.symbol,
+                    "report_date": self._audit_report_date(title, notice_date),
+                    "announce_date": notice_date,
+                    "opinion": opinion[0],
+                    "opinion_code": opinion[1],
+                    "source_notice_type": str(first_column.get("column_name") or ""),
+                    "title": title,
+                    "art_code": art_code,
+                    "url": f"https://data.eastmoney.com/notices/detail/{self._symbol_digits(inst.symbol)}/{art_code}.html",
+                }
+            )
+        return self._frame_from_rows("audit_opinions", rows)
 
     async def _fetch_value_analysis_row(
         self,
@@ -508,28 +692,33 @@ class EastMoneyFetcher:
             "client": "WEB",
             "filter": f'(SECURITY_CODE="{self._symbol_digits(inst.symbol)}")',
         }
-        payload = await self._request_json(self._FINANCIAL_URL, params=params)
-        records = ((payload.get("result") or {}).get("data")) or []
-        filtered: list[dict[str, Any]] = []
-        for record in records:
+        payload = await self._json_request(
+            RequestSpec(
+                endpoint="value_analysis", url=self._FINANCIAL_URL, params=params
+            )
+        )
+        for record in self._records(payload, "result", "data"):
             trade_date = self._parse_date(record.get("TRADE_DATE"))
             if trade_date is not None and trade_date <= as_of:
-                filtered.append(record)
-        return filtered[0] if filtered else {}
+                return record
+        return {}
 
     async def _fetch_financial_rows(
         self,
         inst: StockInstrument,
         report_date: date,
     ) -> dict[str, dict[str, Any]]:
-        return {
-            name: await self._fetch_financial_report_row(
-                inst=inst,
-                report_name=report_name,
-                report_date=report_date,
+        rows = await asyncio.gather(
+            *(
+                self._fetch_financial_report_row(
+                    inst=inst,
+                    report_name=report_name,
+                    report_date=report_date,
+                )
+                for report_name in self._FINANCIAL_REPORTS.values()
             )
-            for name, report_name in self._FINANCIAL_REPORTS.items()
-        }
+        )
+        return dict(zip(self._FINANCIAL_REPORTS, rows, strict=True))
 
     async def _fetch_financial_report_row(
         self,
@@ -548,7 +737,8 @@ class EastMoneyFetcher:
             "filter": self._financial_filter(inst, report_date),
         }
         pages = await self._fetch_paginated_json(
-            self._FINANCIAL_URL,
+            endpoint=f"financial_report:{report_name}",
+            url=self._FINANCIAL_URL,
             build_params=lambda page: {**params, "pageNumber": str(page)},
             total_count=lambda payload: int(
                 ((payload.get("result") or {}).get("pages")) or 0
@@ -556,40 +746,81 @@ class EastMoneyFetcher:
             page_size=1,
         )
         for payload in pages:
-            records = ((payload.get("result") or {}).get("data")) or []
+            records = self._records(payload, "result", "data")
             matched = self._match_security_code(records, inst.symbol)
             if matched:
                 return matched
         return {}
 
+    @staticmethod
+    def _should_retry_request(exc: BaseException) -> bool:
+        if isinstance(exc, EastMoneyBlockedError):
+            return True
+        if isinstance(exc, RuntimeError):
+            return False
+        if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, ValueError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_error = cast(httpx.HTTPStatusError, exc)
+            return status_error.response.status_code in {
+                408,
+                409,
+                425,
+                429,
+                500,
+                502,
+                503,
+                504,
+            }
+        return False
+
+    async def _json_request(self, spec: RequestSpec) -> dict[str, Any]:
+        return await self._json_fetcher.fetch_json(spec)
+
     async def _fetch_paginated_json(
         self,
-        url: str,
         *,
+        endpoint: str,
+        url: str,
         build_params: Callable[[int], dict[str, Any]],
         total_count: Callable[[dict[str, Any]], int],
         page_size: int,
         referer: str | None = None,
-        extra_headers: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
-        first_page = await self._request_json(
-            url,
-            params=build_params(1),
-            referer=referer,
-            extra_headers=extra_headers,
+        first_page = await self._json_request(
+            RequestSpec(
+                endpoint=endpoint,
+                url=url,
+                params=build_params(1),
+                referer=referer,
+                headers=headers,
+            )
         )
         total_pages = max((total_count(first_page) + page_size - 1) // page_size, 1)
-        pages = [first_page]
-        for page_index in range(2, total_pages + 1):
-            pages.append(
-                await self._request_json(
-                    url,
-                    params=build_params(page_index),
-                    referer=referer,
-                    extra_headers=extra_headers,
+        if total_pages == 1:
+            return [first_page]
+        remaining_pages = await asyncio.gather(
+            *(
+                self._json_request(
+                    RequestSpec(
+                        endpoint=endpoint,
+                        url=url,
+                        params=build_params(page_index),
+                        referer=referer,
+                        headers=headers,
+                    )
                 )
+                for page_index in range(2, total_pages + 1)
             )
-        return pages
+        )
+        return [first_page, *remaining_pages]
+
+    def _is_anti_crawl_response(self, response: httpx.Response) -> bool:
+        if response.status_code in self._ANTI_CRAWL_STATUS_CODES:
+            return True
+        lowered = response.text.lower()
+        return any(marker in lowered for marker in self._ANTI_CRAWL_MARKERS)
 
     def _fund_nav_params(
         self,
@@ -721,6 +952,24 @@ class EastMoneyFetcher:
             return None
         return date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
 
+    def _audit_opinion_from_title(self, title: str) -> tuple[str, str] | None:
+        normalized = title.replace(" ", "")
+        if "无法表示意见" in normalized:
+            return ("无法表示意见", "disclaimer")
+        if "否定意见" in normalized:
+            return ("否定意见", "adverse")
+        if "保留意见" in normalized:
+            return ("保留意见", "qualified")
+        if "无保留意见" in normalized and "审计" in normalized:
+            return ("无保留意见", "unqualified")
+        return None
+
+    def _audit_report_date(self, title: str, announce_date: date) -> date:
+        matched = re.search(r"(20\d{2})年", title)
+        if matched is None:
+            return date(announce_date.year - 1, 12, 31)
+        return date(int(matched.group(1)), 12, 31)
+
     def _difference(self, left: Any, right: Any) -> float | None:
         left_value = self._to_float(left)
         right_value = self._to_float(right)
@@ -745,7 +994,7 @@ class EastMoneyFetcher:
             return prefix, digits
         return "1", self._symbol_digits(symbol)
 
-    def _exchange_from_market_code(self, code: str) -> str:
+    def _exchange_from_market_code(self, code: str) -> Literal["SH", "SZ", "BJ"]:
         if code == "0":
             return "SZ"
         if code == "1":
@@ -784,8 +1033,49 @@ class EastMoneyFetcher:
     def _empty_frame(self, name: str) -> pl.DataFrame:
         return pl.DataFrame(schema=self._EMPTY_SCHEMA[name])
 
+    def _frame_from_rows(
+        self,
+        name: str,
+        rows: list[dict[str, Any]],
+        *,
+        sort_by: str | None = None,
+    ) -> pl.DataFrame:
+        if not rows:
+            return self._empty_frame(name)
+        frame = self._frame_from_records(rows, columns=tuple(self._EMPTY_SCHEMA[name]))
+        return frame.sort(sort_by) if sort_by is not None else frame
+
+    @staticmethod
+    def _frame_from_records(
+        rows: list[dict[str, Any]],
+        *,
+        columns: list[str] | tuple[str, ...],
+    ) -> pl.DataFrame:
+        return pl.DataFrame(rows).select(list(columns))
+
+    @staticmethod
+    def _records(payload: dict[str, Any], *path: str) -> list[dict[str, Any]]:
+        current: Any = payload
+        for part in path:
+            current = current.get(part) if isinstance(current, dict) else None
+        if not isinstance(current, list):
+            return []
+        return [row for row in current if isinstance(row, dict)]
+
+    def _page_records(
+        self, pages: list[dict[str, Any]], *path: str
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for page in pages:
+            rows.extend(self._records(page, *path))
+        return rows
+
     def _empty_fundamentals_frame(self, fields: list[str]) -> pl.DataFrame:
-        schema = {"report_date": pl.Date, "announce_date": pl.Date, "symbol": pl.String}
-        for field in fields:
-            schema[field] = pl.Float64
+        schema: dict[str, pl.DataType | type[pl.DataType] | None] = {
+            "report_date": pl.Date,
+            "announce_date": pl.Date,
+            "symbol": pl.String,
+        }
+        for column in fields:
+            schema[column] = pl.Float64
         return pl.DataFrame(schema=schema)

@@ -8,7 +8,7 @@ import polars as pl
 from qore_core.config import QoreConfig
 from qore_data.store.duckdb import QoreStore
 
-from qore_intelligence.model.artifact import ModelArtifact
+from qore_intelligence.model.artifact import TrainedModelArtifact
 from qore_intelligence.model.lgbm_rank import MultiHorizonRanker
 from qore_intelligence.model.normalizer import (
     CrossSectionalZScore,
@@ -22,7 +22,7 @@ from qore_intelligence.model.registry import ModelRegistry
 
 @dataclass(slots=True)
 class TrainingRun:
-    artifact: ModelArtifact
+    artifact: TrainedModelArtifact
     artifact_path: Path
 
 
@@ -66,12 +66,12 @@ def training_frame_from_store(
     if end is not None:
         factor_scores = factor_scores.filter(pl.col("date") <= end)
     factor_scores = factor_scores.filter(pl.col("factor_name").is_in(factor_names))
-    pivoted = (
-        factor_scores.select("date", "symbol", "factor_name", score_column)
-        .collect()
-        .pivot(on="factor_name", index=["date", "symbol"], values=score_column)
-        .lazy()
+    pivoted = pl.DataFrame(
+        factor_scores.select("date", "symbol", "factor_name", score_column).collect()
     )
+    pivoted = pivoted.pivot(
+        on="factor_name", index=["date", "symbol"], values=score_column
+    ).lazy()
     return pivoted.join(forward_returns, on=["date", "symbol"], how="inner")
 
 

@@ -10,7 +10,7 @@ class FinBERT:
     model_name: str
 
     @classmethod
-    def from_config(cls, config: QoreConfig) -> "FinBERT":
+    def from_config(cls, config: QoreConfig) -> FinBERT:
         return cls(model_name=config.intelligence.news_finbert_model)
 
     def score(self, text: str) -> float:

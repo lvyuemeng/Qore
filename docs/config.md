@@ -2,13 +2,14 @@
 
 ## Purpose
 
-`QoreConfig` is the single configuration entrypoint for infrastructure and runtime
-behavior. New crate code should read filesystem paths, source behavior, and operator
-runtime settings from config rather than ad hoc constructor arguments.
+`QoreConfig` is the single entrypoint for infrastructure and runtime behavior.
+New crate code should read paths, source behavior, retry/cooldown behavior,
+runner defaults, and backtest defaults from config instead of ad hoc constructor
+arguments.
 
-It should not be used as the long-term home for trained model tuning outputs.
-Model hyperparameters, selected factor sets, learned weights, and training metadata
-belong to exported model artifacts, not static repository config.
+It is not the long-term home for trained model outputs.
+Model metadata, feature schema, learned weights, training summaries, and trained
+payload state belong to model artifacts, not static repository config.
 
 Source of truth:
 
@@ -17,7 +18,7 @@ Source of truth:
 
 ## Current Config Tree
 
-`QoreConfig` currently contains these sections:
+`QoreConfig` currently contains:
 
 - `data`
   - `db_path`
@@ -25,6 +26,13 @@ Source of truth:
   - `eastmoney_concurrency`
   - `eastmoney_delay_min`
   - `eastmoney_delay_max`
+  - `eastmoney_timeout`
+  - `eastmoney_max_retries`
+  - `eastmoney_retry_budget`
+  - `eastmoney_cooldown_min`
+  - `eastmoney_cooldown_max`
+  - `eastmoney_retry_backoff_min`
+  - `eastmoney_retry_backoff_max`
 - `intelligence`
   - `model_store_root`
   - `news_llm_daily_budget`
@@ -49,6 +57,38 @@ Source of truth:
   - `slippage`
   - `drawdown_stop`
 
+## What config should contain
+
+Keep these in config:
+
+- filesystem roots and storage locations
+- source/fetch behavior such as concurrency, timeout, retry, cooldown
+- runtime budgets such as LLM call budgets
+- runner/backtest runtime defaults
+
+Do not keep these in config:
+
+- trained model payload state
+- selected factor schema used by a saved model
+- learned ensemble weights
+- training metadata and validation summaries
+- model-family-specific learned settings produced by training
+
+## Model Artifact Boundary
+
+The current intelligence boundary is:
+
+- `ModelArtifactManifest`: persisted metadata only
+- `ModelPayload`: trained runtime objects only
+- `TrainedModelArtifact`: manifest + payload envelope for persistence
+- `ModelPipeline`: fit/predict runtime behavior only
+- `ModelRegistry`: load/save behavior only
+
+Practical rule:
+
+- `QoreConfig` tells the system where to store and how to operate
+- model artifacts tell the system what was trained and what trained state to load
+
 ## Usage Pattern
 
 Load config from YAML:
@@ -59,12 +99,18 @@ from qore_core.config import QoreConfig
 config = QoreConfig.from_yaml("config/qore.yaml")
 ```
 
-Classes that depend on config should expose `from_config()`:
+Create config-driven components:
 
 ```python
+from qore_core import TradingCalendar
+from qore_data.fetcher import EastMoneyFetcher
+from qore_data.store.duckdb import QoreStore
+from qore_intelligence.model.registry import ModelRegistry
+
+calendar = TradingCalendar.from_config(config)
 fetcher = EastMoneyFetcher.from_config(config)
 store = QoreStore.from_config(config)
-pipeline = ModelPipeline.from_config(config)
+registry = ModelRegistry.from_config(config)
 ```
 
 ## Example YAML
@@ -76,6 +122,13 @@ data:
   eastmoney_concurrency: 8
   eastmoney_delay_min: 0.2
   eastmoney_delay_max: 0.5
+  eastmoney_timeout: 15.0
+  eastmoney_max_retries: 3
+  eastmoney_retry_budget: 20
+  eastmoney_cooldown_min: 1.5
+  eastmoney_cooldown_max: 8.0
+  eastmoney_retry_backoff_min: 0.5
+  eastmoney_retry_backoff_max: 2.0
 
 intelligence:
   model_store_root: models
@@ -93,7 +146,7 @@ stock:
 fund:
   rebalance_freq: M
   top_k: 20
-  max_weight: 0.1
+  max_weight: 0.10
 
 derivative:
   rebalance_freq: D
@@ -106,31 +159,17 @@ backtest:
   drawdown_stop: 0.15
 ```
 
-## Model Artifact Boundary
-
-The intended boundary is:
-
-- `QoreConfig`: model store location, runtime budgets, source behavior, backtest behavior
-- model export/import artifact: tuned hyperparameters, factor schema, selected horizons, ensemble weights, training summary, validation outputs
-
-Examples of values that should live with the saved model artifact rather than static config:
-
-- Optuna-selected hyperparameters
-- factor list or feature schema used at fit time
-- horizon set used by the trained model
-- ensemble weights learned or selected during training
-- training/validation summaries
-
 ## Current Constraints
 
-- Paths are still library-first; no official CLI config contract exists yet
-- Current code still keeps some model-shape settings under `intelligence`; that is now a known design mismatch to be removed
-- End-to-end operator examples are still being documented
+- config is still library-first; there is no final CLI/operator config contract yet
+- operator workflow documentation is still being built
+- `data` contains EastMoney runtime hardening controls because the current source scope is EastMoney-first
+- broader source expansion may later require more source-specific subsections or a cleaner source registry shape
 
-## Configuration Rules For New Code
+## Rules For New Code
 
-- Put runtime paths and operator/runtime behavior under `QoreConfig`
-- Prefer `from_config()` over raw path injection
-- Do not add crate runtime config that bypasses `QoreConfig`
-- Do not put trained model tuning outputs or training metadata into static config
-- Keep config aligned with `docs/design.md`, not legacy `src/quant_trade`
+- put runtime paths and operator/runtime behavior under `QoreConfig`
+- prefer `from_config()` over raw path injection
+- do not add crate runtime config that bypasses `QoreConfig`
+- do not put trained model metadata or training outputs into static config
+- keep config aligned with `docs/design.md` and current crate behavior, not legacy `src/quant_trade`

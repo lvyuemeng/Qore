@@ -58,6 +58,24 @@ class AccrualRatioFactor(FundamentalFactor):
 
 
 @dataclass(slots=True)
+class DebtToAssetRatioFactor(FundamentalFactor):
+    name: str = "debt_to_asset_ratio"
+    produces: str = "debt_to_asset_ratio"
+    requires: frozenset[str] = frozenset({"total_liabilities", "total_assets"})
+
+    def compute(self, lf: pl.LazyFrame) -> pl.LazyFrame:
+        return lf.with_columns(
+            pl.when(pl.col("total_assets").abs() > 1e-8)
+            .then(
+                pl.col("total_liabilities").cast(pl.Float64)
+                / pl.col("total_assets").cast(pl.Float64)
+            )
+            .otherwise(None)
+            .alias(self.produces)
+        )
+
+
+@dataclass(slots=True)
 class ROEStabilityFactor(FundamentalFactor):
     window: int = 8
     name: str = "roe_stability"

@@ -5,14 +5,14 @@ from datetime import date
 
 import polars as pl
 from qore_backtest.engine import BacktestEngine, BacktestResult
-from qore_core import QoreConfig, StockInstrument, TradingCalendar, Universe
-from qore_data import evaluate_stock_categories
+from qore_core import QoreConfig, TradingCalendar
 from qore_data.store.duckdb import QoreStore
+from qore_data.universe import StockCandidateSpec, StockSelectionPipeline
 from qore_intelligence.model.lgbm_rank import MultiHorizonRanker
 from qore_intelligence.model.workflow import fit_and_save_model_from_store
+from qore_intelligence.strategy import build_ranking_strategy
 from qore_runner.runner import StrategyRunner
 from qore_runner.sizer import EqualWeightSizer
-from qore_runner.strategies.ranking import RankingStrategy
 
 
 def run_stock_ranking_workflow(config: QoreConfig) -> BacktestResult:
@@ -29,15 +29,17 @@ def run_stock_ranking_workflow(config: QoreConfig) -> BacktestResult:
     )
     _seed_backtest_inputs(store)
 
-    universe = Universe(
-        [
-            StockInstrument(symbol="AAA.SH", exchange="SH", industry="bank"),
-            StockInstrument(symbol="BBB.SZ", exchange="SZ", industry="tech"),
-        ]
+    universe = StockSelectionPipeline.from_index(
+        store,
+        index_symbol="000300.SH",
+        as_of=date(2026, 4, 13),
+    ).to_universe(
+        StockCandidateSpec(exclude_st=False, exclude_suspended=False),
+        keep_suspended=True,
     )
     runner = StrategyRunner.from_config(
         config,
-        RankingStrategy.from_config(config),
+        build_ranking_strategy(config),
         EqualWeightSizer(top_k=1),
     )
     engine = BacktestEngine.from_config(
@@ -79,13 +81,13 @@ def run_example_backtest(config: QoreConfig) -> None:
 def build_stock_category_report(config: QoreConfig) -> pl.DataFrame:
     store = QoreStore.from_config(config)
     _seed_universe_inputs(store)
-    return evaluate_stock_categories(
+    return StockSelectionPipeline.from_index(
         store,
         index_symbol="000300.SH",
         as_of=date(2026, 4, 13),
-        start=date(2026, 4, 1),
-        end=date(2026, 4, 30),
-    )
+        announcement_start=date(2026, 4, 1),
+        announcement_end=date(2026, 4, 30),
+    ).category_report()
 
 
 def _config_from_args(args: Namespace) -> QoreConfig:

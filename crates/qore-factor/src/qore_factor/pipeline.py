@@ -90,7 +90,7 @@ class FactorPipeline:
                     msg = f"Missing forward return column: {return_column}"
                     raise ValueError(msg)
 
-                daily_ic = (
+                daily_ic = pl.DataFrame(
                     joined.select(
                         "date",
                         pl.col(factor_name).cast(pl.Float64).alias("factor_value"),
@@ -162,10 +162,7 @@ class FactorPipeline:
                 )
             )
 
-        combined = frames[0]
-        for frame in frames[1:]:
-            combined = combined.union(frame)
-        return combined
+        return pl.concat(frames, how="vertical")
 
     def persist(self, lf: pl.LazyFrame, store: QoreStore) -> None:
         store.write("factor_scores", self.to_factor_scores(lf))
@@ -223,7 +220,7 @@ def _series_stat(frame: pl.DataFrame, stat: Literal["mean", "std"]) -> float | N
         return None
     series = frame.get_column("ic")
     value = series.mean() if stat == "mean" else series.std()
-    return None if value is None else float(value)
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def _icir(frame: pl.DataFrame) -> float | None:

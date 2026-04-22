@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from typing import Literal, Protocol
 
 TradingSession = Literal["auction", "nav", "continuous"]
+
+
+class SessionInstrument(Protocol):
+    symbol: str
+    session: TradingSession
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +20,29 @@ class StockInstrument:
     industry: str
     price_limit_pct: float = 0.10
     session: TradingSession = "auction"
+
+    @classmethod
+    def from_mapping(
+        cls,
+        row: Mapping[str, object],
+        *,
+        symbol_key: str = "symbol",
+        exchange_key: str = "exchange",
+        industry_key: str = "industry",
+        price_limit_key: str = "price_limit_pct",
+    ) -> StockInstrument:
+        exchange = _stock_exchange(row.get(exchange_key))
+        price_limit = row.get(price_limit_key)
+        return cls(
+            symbol=str(row[symbol_key]),
+            exchange=exchange,
+            industry=str(row.get(industry_key) or ""),
+            price_limit_pct=(
+                float(price_limit)
+                if isinstance(price_limit, int | float | str)
+                else 0.10
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,3 +68,15 @@ class DerivativeInstrument:
 
 
 Instrument = StockInstrument | FundInstrument | DerivativeInstrument
+
+
+def _stock_exchange(value: object) -> Literal["SH", "SZ", "BJ"]:
+    normalized = str(value).upper()
+    if normalized == "SH":
+        return "SH"
+    if normalized == "SZ":
+        return "SZ"
+    if normalized == "BJ":
+        return "BJ"
+    msg = f"Unsupported stock exchange code: {value}"
+    raise ValueError(msg)

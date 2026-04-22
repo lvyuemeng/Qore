@@ -35,9 +35,14 @@ class TrainingMetadata:
 
 
 @dataclass(slots=True)
-class ModelArtifact:
+class ModelArtifactManifest:
     model_name: str
     feature_schema: FeatureSchema
     ranker_spec: RankerSpec
     training_metadata: TrainingMetadata = field(default_factory=TrainingMetadata)
-    payload: ModelPayload | None = None
+
+
+@dataclass(slots=True)
+class TrainedModelArtifact:
+    manifest: ModelArtifactManifest
+    payload: ModelPayload

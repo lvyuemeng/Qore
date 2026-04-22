@@ -1,8 +1,9 @@
 from qore_intelligence.model.artifact import (
     FeatureSchema,
-    ModelArtifact,
+    ModelArtifactManifest,
     ModelPayload,
     RankerSpec,
+    TrainedModelArtifact,
     TrainingMetadata,
 )
 from qore_intelligence.model.lgbm_rank import MultiHorizonRanker
@@ -28,7 +29,7 @@ from qore_intelligence.model.workflow import (
 __all__ = [
     "CrossSectionalZScore",
     "FeatureSchema",
-    "ModelArtifact",
+    "ModelArtifactManifest",
     "ModelPayload",
     "ModelPipeline",
     "ModelRegistry",
@@ -38,6 +39,7 @@ __all__ = [
     "RankScaler",
     "RankerSpec",
     "RobustScaler",
+    "TrainedModelArtifact",
     "TrainingMetadata",
     "TrainingRun",
     "WalkForwardValidation",

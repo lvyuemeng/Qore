@@ -79,7 +79,9 @@ async def test_news_pipeline_processes_and_persists_articles(tmp_path: Path) -> 
     )
 
     assert result.height == 2
-    persisted = store.read("news_scores").collect().sort(["date", "symbol"])
+    persisted = pl.DataFrame(store.read("news_scores").collect()).sort(
+        ["date", "symbol"]
+    )
     assert persisted.height == 2
     assert persisted.get_column("symbol").to_list() == ["000001.SZ", "600519.SH"]
     assert persisted.get_column("source_layer").to_list() == ["llm", "llm"]

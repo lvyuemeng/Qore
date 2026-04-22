@@ -1335,6 +1335,13 @@ def compute_metrics(
 - Never import `akshare` in any crate. Read `.ai/refs/akshare/` as reference only.
 - `.collect()` is only permitted in fit/evaluation or execution boundaries such as model training and backtest execution.
   `BacktestEngine.run()`. Everywhere else: LazyFrame.
+- runner and backtest contracts must remain source-agnostic. Strategy interfaces
+  may accept generic contextual inputs, but not source-specific parameters such
+  as `news_scores` or model-specific objects.
+- prefer Polars or backend-native operators for sums, maxima, joins, filters,
+  drawdowns, turnover, and score alignment before introducing Python loops.
+- only introduce concurrency after a clear bottleneck is identified and after
+  backend-native vectorization or caching has been applied.
 - `EventExtraction` (Pydantic model) is the only LLM output type that crosses
   into trading logic. Raw text is never used for decisions.
 - `Universe` must be homogeneous — all instruments the same concrete type.

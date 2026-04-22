@@ -25,3 +25,7 @@ class FundamentalFactor:
 
 class CrossSectionalFactor:
     """Marker for factors derived from cross-sectional normalization/ranking."""
+
+
+class EventFactor:
+    """Marker for factors derived from event or status overlays."""

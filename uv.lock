@@ -2282,6 +2282,7 @@ dependencies = [
     { name = "qore-core" },
     { name = "qore-data" },
     { name = "qore-factor" },
+    { name = "qore-runner" },
 ]
 
 [package.optional-dependencies]
@@ -2309,6 +2310,7 @@ requires-dist = [
     { name = "qore-core", editable = "crates/qore-core" },
     { name = "qore-data", editable = "crates/qore-data" },
     { name = "qore-factor", editable = "crates/qore-factor" },
+    { name = "qore-runner", editable = "crates/qore-runner" },
     { name = "torch", marker = "extra == 'nlp'", specifier = ">=2.2" },
     { name = "transformers", marker = "extra == 'nlp'", specifier = ">=4.40" },
 ]
@@ -2319,11 +2321,8 @@ name = "qore-runner"
 version = "0.1.0"
 source = { editable = "crates/qore-runner" }
 dependencies = [
-    { name = "numpy" },
     { name = "polars" },
     { name = "qore-core" },
-    { name = "qore-factor" },
-    { name = "qore-intelligence" },
 ]
 
 [package.optional-dependencies]
@@ -2334,11 +2333,8 @@ opt = [
 [package.metadata]
 requires-dist = [
     { name = "cvxpy", marker = "extra == 'opt'", specifier = ">=1.4" },
-    { name = "numpy", specifier = ">=2.0" },
     { name = "polars", specifier = ">=1.0" },
     { name = "qore-core", editable = "crates/qore-core" },
-    { name = "qore-factor", editable = "crates/qore-factor" },
-    { name = "qore-intelligence", editable = "crates/qore-intelligence" },
 ]
 provides-extras = ["opt"]
 

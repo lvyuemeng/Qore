@@ -7,6 +7,12 @@ import polars as pl
 import pytest
 from qore_core import QoreConfig
 from qore_data.store.duckdb import QoreStore
+from qore_factor.event.alert import AlertCondition, AlertRule, build_alert_frame
+from qore_factor.event.audit import (
+    ActiveAuditExclusionFactor,
+    AdverseAuditOpinionAgeFactor,
+    AdverseAuditOpinionFlagFactor,
+)
 from qore_factor.fundamental.growth import (
     NetProfitGrowthFactor,
     ProfitGrowthPremiumFactor,
@@ -16,9 +22,16 @@ from qore_factor.fundamental.quality import (
     AccrualRatioFactor,
     AssetTurnoverFactor,
     CFOYieldFactor,
+    DebtToAssetRatioFactor,
     GrossMarginFactor,
 )
 from qore_factor.fundamental.value import BookToPriceFactor
+from qore_factor.ohlcv.liquidity import (
+    AverageAmountFactor,
+    CapacityPenaltyFactor,
+    MinimumAmountFactor,
+    PositionToLiquidityRatioFactor,
+)
 from qore_factor.ohlcv.momentum import MomentumFactor
 from qore_factor.ohlcv.volatility import RealizedVolatilityFactor
 from qore_factor.pipeline import FactorPipeline
@@ -42,7 +55,7 @@ def test_pipeline_adds_factor_columns() -> None:
     pipeline = FactorPipeline().add(
         MomentumFactor(lookback=1, skip=0), BookToPriceFactor()
     )
-    result = pipeline.run(lf).collect()
+    result = _collect_dataframe(pipeline.run(lf))
 
     assert "mom_1d_skip0" in result.columns
     assert "bp" in result.columns
@@ -63,7 +76,7 @@ def test_pipeline_normalizes_cross_sectionally() -> None:
     ).lazy()
 
     pipeline = FactorPipeline().add(BookToPriceFactor()).normalize(method="zscore")
-    result = pipeline.run(lf).collect()
+    result = _collect_dataframe(pipeline.run(lf))
 
     assert "bp_z" in result.columns
 
@@ -86,11 +99,91 @@ def test_pipeline_adds_realized_volatility_factor() -> None:
         }
     ).lazy()
 
-    result = FactorPipeline().add(RealizedVolatilityFactor(window=2)).run(lf).collect()
+    result = _collect_dataframe(
+        FactorPipeline().add(RealizedVolatilityFactor(window=2)).run(lf)
+    )
 
     assert "realized_vol_2d" in result.columns
     assert result.get_column("realized_vol_2d").null_count() > 0
     assert result.get_column("realized_vol_2d").drop_nulls().len() > 0
+
+
+def test_pipeline_adds_liquidity_capacity_factors() -> None:
+    lf = pl.DataFrame(
+        {
+            "date": [
+                date(2026, 1, 1),
+                date(2026, 1, 2),
+                date(2026, 1, 3),
+                date(2026, 1, 1),
+                date(2026, 1, 2),
+                date(2026, 1, 3),
+            ],
+            "symbol": ["AAA", "AAA", "AAA", "BBB", "BBB", "BBB"],
+            "amount": [
+                10_000_000.0,
+                12_000_000.0,
+                8_000_000.0,
+                5_000_000.0,
+                4_000_000.0,
+                6_000_000.0,
+            ],
+            "target_position_cny": [
+                800_000.0,
+                800_000.0,
+                800_000.0,
+                900_000.0,
+                900_000.0,
+                900_000.0,
+            ],
+        }
+    ).lazy()
+
+    result = _collect_dataframe(
+        FactorPipeline()
+        .add(
+            AverageAmountFactor(window=2),
+            MinimumAmountFactor(window=2),
+            PositionToLiquidityRatioFactor(liquidity_column="avg_amount_2d"),
+            CapacityPenaltyFactor(
+                ratio_column="position_to_amount_2d_ratio", threshold=0.10
+            ),
+        )
+        .run(lf)
+    ).sort(["symbol", "date"])
+
+    avg_amount = result.get_column("avg_amount_2d").to_list()
+    assert avg_amount[0] is None
+    assert avg_amount[1] == pytest.approx(11_000_000.0)
+    assert avg_amount[2] == pytest.approx(10_000_000.0)
+    assert avg_amount[3] is None
+    assert avg_amount[4] == pytest.approx(4_500_000.0)
+    assert avg_amount[5] == pytest.approx(5_000_000.0)
+
+    min_amount = result.get_column("min_amount_2d").to_list()
+    assert min_amount[0] is None
+    assert min_amount[1] == pytest.approx(10_000_000.0)
+    assert min_amount[2] == pytest.approx(8_000_000.0)
+    assert min_amount[3] is None
+    assert min_amount[4] == pytest.approx(4_000_000.0)
+    assert min_amount[5] == pytest.approx(4_000_000.0)
+
+    liquidity_ratio = result.get_column("position_to_amount_2d_ratio").to_list()
+    assert liquidity_ratio[0] is None
+    assert liquidity_ratio[1] == pytest.approx(800_000.0 / 11_000_000.0)
+    assert liquidity_ratio[2] == pytest.approx(0.08)
+    assert liquidity_ratio[3] is None
+    assert liquidity_ratio[4] == pytest.approx(0.2)
+    assert liquidity_ratio[5] == pytest.approx(0.18)
+    penalties = result.get_column(
+        "capacity_penalty_position_to_amount_2d_ratio"
+    ).to_list()
+    assert penalties[0] is None
+    assert penalties[1] == pytest.approx(1.0)
+    assert penalties[2] == pytest.approx(1.0)
+    assert penalties[3] is None
+    assert penalties[4] == pytest.approx(0.5)
+    assert penalties[5] == pytest.approx(0.5555555556)
 
 
 def test_pipeline_adds_fundamental_quality_factors() -> None:
@@ -104,13 +197,9 @@ def test_pipeline_adds_fundamental_quality_factors() -> None:
         }
     ).lazy()
 
-    result = (
-        FactorPipeline()
-        .add(GrossMarginFactor(), AssetTurnoverFactor())
-        .run(lf)
-        .collect()
-        .sort("symbol")
-    )
+    result = _collect_dataframe(
+        FactorPipeline().add(GrossMarginFactor(), AssetTurnoverFactor()).run(lf)
+    ).sort("symbol")
 
     assert result.get_column("gross_margin").to_list() == [0.35, 0.20]
     assert result.get_column("asset_turnover").to_list() == pytest.approx([0.25, 0.4])
@@ -127,16 +216,113 @@ def test_pipeline_adds_fundamental_cashflow_factors() -> None:
         }
     ).lazy()
 
-    result = (
-        FactorPipeline()
-        .add(CFOYieldFactor(), AccrualRatioFactor())
-        .run(lf)
-        .collect()
-        .sort("symbol")
-    )
+    result = _collect_dataframe(
+        FactorPipeline().add(CFOYieldFactor(), AccrualRatioFactor()).run(lf)
+    ).sort("symbol")
 
     assert result.get_column("cfo_yield").to_list() == pytest.approx([0.2, 0.3])
     assert result.get_column("accrual_ratio").to_list() == pytest.approx([0.05, -0.05])
+
+
+def test_pipeline_adds_debt_to_asset_ratio_factor() -> None:
+    lf = pl.DataFrame(
+        {
+            "date": [date(2026, 3, 31), date(2026, 3, 31), date(2026, 3, 31)],
+            "symbol": ["AAA", "BBB", "CCC"],
+            "total_liabilities": [120.0, 150.0, 10.0],
+            "total_assets": [400.0, 300.0, 0.0],
+        }
+    ).lazy()
+
+    result = _collect_dataframe(
+        FactorPipeline().add(DebtToAssetRatioFactor()).run(lf)
+    ).sort("symbol")
+
+    assert result.get_column("debt_to_asset_ratio").to_list()[:2] == pytest.approx(
+        [0.3, 0.5]
+    )
+    assert result.row(2, named=True)["debt_to_asset_ratio"] is None
+
+
+def test_pipeline_adds_audit_event_factors() -> None:
+    lf = pl.DataFrame(
+        {
+            "date": [date(2026, 4, 19), date(2026, 4, 19), date(2026, 4, 19)],
+            "symbol": ["AAA", "BBB", "CCC"],
+            "has_adverse_audit_opinion": [True, False, None],
+            "active_audit_exclusion": [True, False, None],
+            "adverse_audit_opinion_age_days": [10, 250, None],
+        }
+    ).lazy()
+
+    result = _collect_dataframe(
+        FactorPipeline()
+        .add(
+            AdverseAuditOpinionFlagFactor(),
+            ActiveAuditExclusionFactor(),
+            AdverseAuditOpinionAgeFactor(),
+        )
+        .run(lf)
+    ).sort("symbol")
+
+    assert result.get_column("has_adverse_audit_opinion").to_list() == pytest.approx(
+        [1.0, 0.0, 0.0]
+    )
+    assert result.get_column("active_audit_exclusion").to_list() == pytest.approx(
+        [1.0, 0.0, 0.0]
+    )
+    assert result.get_column("adverse_audit_opinion_age_days").to_list()[
+        :2
+    ] == pytest.approx([10.0, 250.0])
+    assert result.row(2, named=True)["adverse_audit_opinion_age_days"] is None
+
+
+def test_build_alert_frame_from_generic_conditions() -> None:
+    lf = pl.DataFrame(
+        {
+            "date": [date(2026, 4, 18), date(2026, 4, 18), date(2026, 4, 18)],
+            "symbol": ["AAA", "BBB", "CCC"],
+            "pct_change": [-0.08, -0.03, -0.09],
+            "turnover_cny": [8_000_000.0, 8_000_000.0, 3_000_000.0],
+            "has_adverse_audit_opinion": [False, True, True],
+        }
+    ).lazy()
+
+    alerts = pl.DataFrame(
+        build_alert_frame(
+            lf,
+            rules=(
+                AlertRule(
+                    name="single_day_drop",
+                    conditions=(
+                        AlertCondition("pct_change", "le", -0.07),
+                        AlertCondition("turnover_cny", "gt", 5_000_000.0),
+                    ),
+                ),
+                AlertRule(
+                    name="adverse_audit_context",
+                    conditions=(
+                        AlertCondition("has_adverse_audit_opinion", "eq", True),
+                    ),
+                    action="record_alert",
+                ),
+            ),
+        ).collect()
+    )
+    alerts = alerts.sort(["alert_name", "symbol"])
+
+    assert alerts.height == 3
+    assert alerts.get_column("alert_name").to_list() == [
+        "adverse_audit_context",
+        "adverse_audit_context",
+        "single_day_drop",
+    ]
+    assert alerts.get_column("symbol").to_list() == ["BBB", "CCC", "AAA"]
+    assert alerts.get_column("alert_action").to_list() == [
+        "record_alert",
+        "record_alert",
+        "emit_alert",
+    ]
 
 
 def test_pipeline_adds_fundamental_growth_factors() -> None:
@@ -149,7 +335,7 @@ def test_pipeline_adds_fundamental_growth_factors() -> None:
         }
     ).lazy()
 
-    result = (
+    result = _collect_dataframe(
         FactorPipeline()
         .add(
             RevenueGrowthFactor(),
@@ -157,9 +343,7 @@ def test_pipeline_adds_fundamental_growth_factors() -> None:
             ProfitGrowthPremiumFactor(),
         )
         .run(lf)
-        .collect()
-        .sort("symbol")
-    )
+    ).sort("symbol")
 
     assert result.get_column("revenue_growth_yoy").to_list() == pytest.approx(
         [0.10, 0.05]
@@ -237,10 +421,18 @@ def test_pipeline_persists_factor_scores(tmp_path: Path) -> None:
         lf, store
     )
 
-    result = (
-        store.read("factor_scores").collect().sort(["date", "symbol", "factor_name"])
+    result = _collect_dataframe(store.read("factor_scores")).sort(
+        ["date", "symbol", "factor_name"]
     )
     assert result.height == 2
     assert result.get_column("factor_name").to_list() == ["bp", "bp"]
     assert result.get_column("raw_value").to_list() == pytest.approx([0.5, 1.0])
     assert result.get_column("z_score").null_count() == 0
+
+
+def _collect_dataframe(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:
+    collected = df.collect() if isinstance(df, pl.LazyFrame) else df
+    if not isinstance(collected, pl.DataFrame):
+        msg = "Expected DataFrame during factor test materialization."
+        raise TypeError(msg)
+    return collected

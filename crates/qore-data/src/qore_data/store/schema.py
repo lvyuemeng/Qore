@@ -84,6 +84,7 @@ DATASETS: dict[str, Dataset] = {
                 ("gross_margin", pa.float64()),
                 ("revenue", pa.float64()),
                 ("net_income", pa.float64()),
+                ("total_liabilities", pa.float64()),
                 ("total_assets", pa.float64()),
                 ("operating_cashflow", pa.float64()),
             ]
@@ -126,6 +127,23 @@ DATASETS: dict[str, Dataset] = {
         partition_cols=["symbol"],
         dedup_keys=["as_of", "symbol"],
     ),
+    "stock_statuses": Dataset(
+        name="stock_statuses",
+        schema=pa.schema(
+            [
+                ("as_of", pa.date32()),
+                ("symbol", pa.string()),
+                ("board", pa.string()),
+                ("industry", pa.string()),
+                ("is_st", pa.bool_()),
+                ("is_suspended", pa.bool_()),
+                ("price_limit_pct", pa.float64()),
+                ("is_tradeable", pa.bool_()),
+            ]
+        ),
+        partition_cols=["symbol"],
+        dedup_keys=["as_of", "symbol"],
+    ),
     "analyst_forecasts": Dataset(
         name="analyst_forecasts",
         schema=pa.schema(
@@ -156,6 +174,24 @@ DATASETS: dict[str, Dataset] = {
                 ("title", pa.string()),
                 ("notice_type", pa.string()),
                 ("notice_date", pa.date32()),
+                ("art_code", pa.string()),
+                ("url", pa.string()),
+            ]
+        ),
+        partition_cols=["symbol"],
+        dedup_keys=["symbol", "art_code"],
+    ),
+    "stock_audit_opinions": Dataset(
+        name="stock_audit_opinions",
+        schema=pa.schema(
+            [
+                ("symbol", pa.string()),
+                ("report_date", pa.date32()),
+                ("announce_date", pa.date32()),
+                ("opinion", pa.string()),
+                ("opinion_code", pa.string()),
+                ("source_notice_type", pa.string()),
+                ("title", pa.string()),
                 ("art_code", pa.string()),
                 ("url", pa.string()),
             ]

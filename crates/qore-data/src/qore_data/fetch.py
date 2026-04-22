@@ -177,3 +177,24 @@ async def _fetch_stock_announcements(
     source: StockSource,
 ) -> pl.DataFrame:
     return await source.announcements(inst, start, end)
+
+
+@singledispatch
+async def fetch_audit_opinions(
+    inst: Instrument,
+    start: date,
+    end: date,
+    source: object,
+) -> pl.DataFrame:
+    del start, end, source
+    raise TypeError(f"Audit opinions not available for {type(inst).__name__}.")
+
+
+@fetch_audit_opinions.register(StockInstrument)
+async def _fetch_stock_audit_opinions(
+    inst: StockInstrument,
+    start: date,
+    end: date,
+    source: StockSource,
+) -> pl.DataFrame:
+    return await source.audit_opinions(inst, start, end)

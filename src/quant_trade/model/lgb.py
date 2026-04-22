@@ -1,21 +1,20 @@
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, Sequence, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import lightgbm as lgb
 import numpy as np
 import optuna
 import polars as pl
 
-from quant_trade import feature
-from quant_trade.config.logger import log, debug_null_profile
+from quant_trade.config.logger import log
 from quant_trade.model.process import (
-    LabelBuilder,
+    BinaryLabelBuilder,
     DiscreteLabelBuilder,
     IdentityLabelBuilder,
-    BinaryLabelBuilder,
+    LabelBuilder,
 )
-from quant_trade.model.store import ModelCard,ModelMeta, ModelStore
+from quant_trade.model.store import ModelCard, ModelMeta, ModelStore
 
 LGBModelCard: TypeAlias = ModelCard[lgb.Booster]
 LGBModel:TypeAlias = lgb.Booster
@@ -81,7 +80,7 @@ class TuneConfig:
     early_stopping_rounds: int = 50
     log_period: int = 100
     seed: int = 42
-    
+
     default_params: dict[str, Any] = field(
         default_factory=lambda: {
             "num_leaves": 31,
@@ -94,7 +93,7 @@ class TuneConfig:
             "min_child_samples": 50,
         }
     )
-    
+
     @staticmethod
     def param_names() -> list[str]:
         return [
@@ -129,7 +128,7 @@ class Processor:
             metric="auc",
         )
     """
-    
+
     objective: str
     metric: str
     ndcg_eval_at: tuple[int, ...] | None
@@ -141,16 +140,16 @@ class Processor:
                 # For ranking, LGBM appends @K using the first value in the eval_at list
                 k = self.ndcg_eval_at[0] if self.ndcg_eval_at else 1
                 return f"{self.metric}@{k}"
-            
+
             case "binary_logloss" | "auc" | "rmse" | "l2" | "l1" | "mape":
                 # These usually remain unchanged
                 return self.metric
-                
+
             case _:
                 # Fallback for aliases or custom metrics
                 return self.metric
-            
-    
+
+
     @staticmethod
     def ranking(
         label_builder: DiscreteLabelBuilder,
@@ -162,14 +161,14 @@ class Processor:
             ndcg = (int(metric.split("@")[1]),)
         else:
             ndcg = (10,)
-        
+
         return Processor(
             objective="lambdarank",
             metric=metric,
             ndcg_eval_at=ndcg,
             label_builder=label_builder,
         )
-    
+
     @staticmethod
     def regression(
         label_builder: IdentityLabelBuilder,
@@ -183,7 +182,7 @@ class Processor:
             ndcg_eval_at=None,
             label_builder=label_builder,
         )
-    
+
     @staticmethod
     def binary(
         label_builder: BinaryLabelBuilder,
@@ -197,7 +196,7 @@ class Processor:
             ndcg_eval_at=None,
             label_builder=label_builder,
         )
-    
+
     def lgb_params(
         self,
         optimized_params: dict[str, Any] | None = None,
@@ -209,12 +208,12 @@ class Processor:
             "metric": self.metric,
             "verbosity": -1,
         })
-        
+
         if self.ndcg_eval_at is not None:
             params["ndcg_eval_at"] = list(self.ndcg_eval_at)
-        
+
         return params
-    
+
     def optimization_direction(self) -> str:
         """Get direction for Optuna optimization."""
         if "ndcg" in self.metric or "auc" in self.metric:
@@ -225,7 +224,7 @@ class Processor:
         """Used by Trainer: Drops null labels and builds grouped Dataset."""
         label_builder = self.label_builder
         label_col = label_builder.label_name
-        if not label_builder.factor in df.columns:
+        if label_builder.factor not in df.columns:
             raise ValueError(f"None of the required label {label_builder.factor} found in DataFrame")
 
         df = label_builder.label(df)
@@ -236,7 +235,7 @@ class Processor:
         df = df.filter(pl.col(label_col).is_not_null())
         if len(df) == 0:
             raise ValueError(f"Training DF is empty after dropping null labels in {label_col}")
-        
+
         group_col = label_builder.rank_by_name
         df = df.sort(group_col)
         X = df.select(avail_feats).to_numpy()
@@ -259,12 +258,12 @@ class Trainer:
         trainer = NewTrainer(processor)
         result = trainer.train(train_df, val_df, CommonConfig())
     """
-    
+
     processor: Processor
     features: list[str]
     optimize: bool = True
     n_trials: int = 50
-    
+
     def train(
         self,
         train_df: pl.DataFrame,
@@ -277,12 +276,12 @@ class Trainer:
         Only CommonConfig needed - metric_config already in processor.
         """
         common = common_config
-        
+
         # Build datasets
         processor = self.processor
         train_ds, features = processor.prepare(train_df,self.features)
         val_ds,_ = processor.prepare(val_df,self.features)
-        
+
         def objective(trial: optuna.Trial) -> float:
             """Optuna objective."""
             opt_params = {
@@ -295,7 +294,7 @@ class Trainer:
                 "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
                 "min_child_samples": trial.suggest_int("min_child_samples", 20, 100),
             }
-            
+
             lgb_params = processor.lgb_params(optimized_params=opt_params)
             log.debug(f"lgb params: {lgb_params}")
             model = lgb.train(
@@ -306,9 +305,9 @@ class Trainer:
                 num_boost_round=common.num_boost_round,
                 callbacks=[lgb.early_stopping(common.early_stopping_rounds)],
             )
-            
+
             return model.best_score["valid"][processor.metric_key()]
-        
+
         # Optimization
         if self.optimize:
             sampler = optuna.samplers.TPESampler(seed=common.seed)
@@ -320,11 +319,11 @@ class Trainer:
             optimized_params = {**common.default_params, **study.best_params}
         else:
             optimized_params = dict(common.default_params)
-        
+
         # Final training
         lgb_params = processor.lgb_params(optimized_params=optimized_params)
         lgb_params.update({"seed": common.seed})
-        
+
         model = lgb.train(
             lgb_params,
             train_ds,
@@ -335,16 +334,16 @@ class Trainer:
                 lgb.log_evaluation(common.log_period),
             ],
         )
-        
+
         metric_val = model.best_score["valid_0"][processor.metric_key()]
         importance = dict(
             sorted(
-                zip(features, model.feature_importance().astype(float)), 
-                key=lambda x: x[1], 
+                zip(features, model.feature_importance().astype(float)),
+                key=lambda x: x[1],
                 reverse=True
             )
         )
-        
+
         return ModelResult(
             model=model,
             metric_name=processor.metric,
@@ -353,7 +352,7 @@ class Trainer:
             params=lgb_params,
             importance=importance,
         )
-    
+
     def batch_train(
         self,
         batch_iter: Generator[tuple[pl.DataFrame, pl.DataFrame]],
@@ -389,7 +388,7 @@ class Trainer:
             val_df=full_val,
             common_config=common_config,
         )
-    
+
 
 @dataclass
 class Predictor:
@@ -406,14 +405,14 @@ class Predictor:
     """
     features: list[str]
     model: lgb.Booster
-    
+
     @classmethod
     def from_store(cls,name:str,*,store:ModelStore,) -> "Predictor":
         card = store.retrieve(name=name)
         return cls(features=card.meta.feature_names,model=card.model)
-    
+
     def _prepare(self, df:pl.DataFrame) -> np.ndarray:
-        X = df.select(self.features).to_numpy() 
+        X = df.select(self.features).to_numpy()
         return X
 
     def predict(self,df:pl.DataFrame,score_name:str) -> pl.DataFrame:

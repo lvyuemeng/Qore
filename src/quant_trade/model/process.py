@@ -1,13 +1,12 @@
 from collections.abc import Generator
 from dataclasses import dataclass
-from datetime import timedelta,date
-from typing import  Final, Protocol
+from datetime import date, timedelta
+from typing import Final, Protocol
 
-import numpy as np
 import polars as pl
 from scipy import stats
 
-from quant_trade.config.logger import log,debug_null_profile
+from quant_trade.config.logger import debug_null_profile, log
 from quant_trade.transform import GSIZE, RANK
 
 LABEL_PREFIX: Final[str] = "label_"
@@ -288,7 +287,7 @@ class Gaussian:
     by:list[str]
     winsor_limits: tuple[float, float] | None = (0.01, 0.99)
     alpha:float = 0.5
-    
+
     def __call__(self,df:pl.DataFrame,factor:str,alias:str) -> pl.DataFrame:
         if factor not in df.columns:
             raise ValueError(f"Factor '{factor}' not found in DataFrame")
@@ -314,7 +313,7 @@ class Gaussian:
         )
 
         return df.with_columns(label).filter(pl.col(alias).is_not_null())
-            
+
 
 @dataclass
 class GaussianLabelBuilder:
@@ -393,13 +392,13 @@ class DiscreteLabelBuilder:
                     .alias(GSIZE),
                 ]
             ).with_columns(
-                (
+
                     (pl.col(RANK) - 1)
                     .mul(self.num_bins)
                     .floordiv(pl.col(GSIZE))
                     .cast(pl.UInt8)
                     .alias(self.label_name)
-                )
+
             ).drop(RANK,GSIZE)
 
     @property

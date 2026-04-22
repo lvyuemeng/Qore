@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import numpy as np
 import polars as pl
@@ -11,9 +11,10 @@ from qore_data.store.duckdb import QoreStore
 
 from qore_intelligence.model.artifact import (
     FeatureSchema,
-    ModelArtifact,
+    ModelArtifactManifest,
     ModelPayload,
     RankerSpec,
+    TrainedModelArtifact,
     TrainingMetadata,
 )
 from qore_intelligence.model.lgbm_rank import MultiHorizonRanker
@@ -50,11 +51,8 @@ class ModelPipeline:
         )
 
     @classmethod
-    def from_artifact(cls, artifact: ModelArtifact) -> ModelPipeline:
+    def from_trained_artifact(cls, artifact: TrainedModelArtifact) -> ModelPipeline:
         payload = artifact.payload
-        if payload is None:
-            msg = "ModelArtifact payload is missing."
-            raise ValueError(msg)
         return cls(
             x_normalizer=payload.x_normalizer,
             y_transformer=payload.y_transformer,
@@ -67,9 +65,9 @@ class ModelPipeline:
         store: QoreStore,
         *,
         model_name: str,
-    ) -> ModelArtifact:
+    ) -> TrainedModelArtifact:
         del store
-        frame = factor_lf.collect()
+        frame = _collect_dataframe(factor_lf)
         if frame.is_empty():
             msg = "Cannot fit ModelPipeline on an empty factor frame."
             raise ValueError(msg)
@@ -86,23 +84,25 @@ class ModelPipeline:
         self.model.fit(transformed_x, targets, feature_columns)
         validation_metrics = self._compute_validation_ic(frame, feature_columns)
         training_window = _training_window(frame)
-        return ModelArtifact(
-            model_name=model_name,
-            feature_schema=FeatureSchema(
-                factor_columns=feature_columns,
-                target_columns=[
-                    f"forward_return_{horizon}d" for horizon in self.model.horizons
-                ],
-            ),
-            ranker_spec=RankerSpec(
-                model_family="multi_horizon_ranker",
-                horizons=list(self.model.horizons),
-                ensemble_weights=dict(self.model.weights),
-            ),
-            training_metadata=TrainingMetadata(
-                validation_metrics=validation_metrics,
-                training_window=training_window,
-                trained_at=datetime.now(UTC),
+        return TrainedModelArtifact(
+            manifest=ModelArtifactManifest(
+                model_name=model_name,
+                feature_schema=FeatureSchema(
+                    factor_columns=feature_columns,
+                    target_columns=[
+                        f"forward_return_{horizon}d" for horizon in self.model.horizons
+                    ],
+                ),
+                ranker_spec=RankerSpec(
+                    model_family="multi_horizon_ranker",
+                    horizons=list(self.model.horizons),
+                    ensemble_weights=dict(self.model.weights),
+                ),
+                training_metadata=TrainingMetadata(
+                    validation_metrics=validation_metrics,
+                    training_window=training_window,
+                    trained_at=datetime.now(UTC),
+                ),
             ),
             payload=ModelPayload(
                 x_normalizer=self.x_normalizer,
@@ -112,7 +112,7 @@ class ModelPipeline:
         )
 
     def predict_score(self, factor_lf: pl.LazyFrame) -> pl.Series:
-        frame = factor_lf.collect()
+        frame = _collect_dataframe(factor_lf)
         if frame.is_empty():
             return pl.Series(name="score", values=[], dtype=pl.Float64)
         feature_columns = _feature_columns(frame)
@@ -265,7 +265,7 @@ def _daily_ic_mean(
     if daily.is_empty():
         return None
     value = daily.get_column("ic").mean()
-    return None if value is None else float(value)
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def _training_window(frame: pl.DataFrame) -> dict[str, str] | None:
@@ -274,6 +274,14 @@ def _training_window(frame: pl.DataFrame) -> dict[str, str] | None:
     dates = frame.get_column("date")
     start = dates.min()
     end = dates.max()
-    if start is None or end is None:
+    if not isinstance(start, date) or not isinstance(end, date):
         return None
     return {"start": start.isoformat(), "end": end.isoformat()}
+
+
+def _collect_dataframe(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:
+    collected = df.collect() if isinstance(df, pl.LazyFrame) else df
+    if not isinstance(collected, pl.DataFrame):
+        msg = "Expected DataFrame during model pipeline materialization."
+        raise TypeError(msg)
+    return collected

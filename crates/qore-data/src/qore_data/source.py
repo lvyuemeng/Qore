@@ -47,6 +47,13 @@ class StockSource(Protocol):
         end: date,
     ) -> pl.DataFrame: ...
 
+    async def audit_opinions(
+        self,
+        inst: StockInstrument,
+        start: date,
+        end: date,
+    ) -> pl.DataFrame: ...
+
 
 class FundSource(Protocol):
     async def fund_nav(

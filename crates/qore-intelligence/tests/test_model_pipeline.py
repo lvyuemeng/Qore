@@ -7,7 +7,13 @@ import numpy as np
 import polars as pl
 from qore_core.config import QoreConfig
 from qore_data.store.duckdb import QoreStore
-from qore_intelligence.model.artifact import FeatureSchema, ModelArtifact, RankerSpec
+from qore_intelligence.model.artifact import (
+    FeatureSchema,
+    ModelArtifactManifest,
+    ModelPayload,
+    RankerSpec,
+    TrainedModelArtifact,
+)
 from qore_intelligence.model.lgbm_rank import MultiHorizonRanker
 from qore_intelligence.model.normalizer import CrossSectionalZScore, RankScaler
 from qore_intelligence.model.pipeline import ModelPipeline
@@ -43,20 +49,27 @@ def test_model_registry_path_derived_from_config(tmp_path: Path) -> None:
         {"intelligence": {"model_store_root": str(tmp_path)}}
     )
     registry = ModelRegistry.from_config(config)
-    artifact = ModelArtifact(
-        model_name="stock_ranker",
-        feature_schema=FeatureSchema(
-            factor_columns=["factor_a"],
-            target_columns=[
-                "forward_return_20d",
-                "forward_return_60d",
-                "forward_return_252d",
-            ],
+    artifact = TrainedModelArtifact(
+        manifest=ModelArtifactManifest(
+            model_name="stock_ranker",
+            feature_schema=FeatureSchema(
+                factor_columns=["factor_a"],
+                target_columns=[
+                    "forward_return_20d",
+                    "forward_return_60d",
+                    "forward_return_252d",
+                ],
+            ),
+            ranker_spec=RankerSpec(
+                model_family="multi_horizon_ranker",
+                horizons=[20, 60, 252],
+                ensemble_weights={"20d": 1 / 3, "60d": 1 / 3, "252d": 1 / 3},
+            ),
         ),
-        ranker_spec=RankerSpec(
-            model_family="multi_horizon_ranker",
-            horizons=[20, 60, 252],
-            ensemble_weights={"20d": 1 / 3, "60d": 1 / 3, "252d": 1 / 3},
+        payload=ModelPayload(
+            x_normalizer=RankScaler(),
+            y_transformer=CrossSectionalZScore(),
+            model=MultiHorizonRanker(horizons=[20, 60, 252]),
         ),
     )
     saved_path = registry.save(artifact, "unit-test")
@@ -64,7 +77,7 @@ def test_model_registry_path_derived_from_config(tmp_path: Path) -> None:
     assert (
         saved_path == Path(tmp_path) / "stock_ranker" / "unit-test" / "artifact.joblib"
     )
-    assert loaded.model_name == "stock_ranker"
+    assert loaded.manifest.model_name == "stock_ranker"
 
 
 def test_model_pipeline_predict_score_returns_series() -> None:
@@ -90,8 +103,12 @@ def test_purged_time_split_separates_train_and_test() -> None:
         frame,
         split_date=date(2026, 1, 6),
     )
-    assert train_df.get_column("date").max() < date(2026, 1, 4)
-    assert test_df.get_column("date").min() >= date(2026, 1, 7)
+    train_max = train_df.get_column("date").max()
+    test_min = test_df.get_column("date").min()
+    assert isinstance(train_max, date)
+    assert isinstance(test_min, date)
+    assert train_max < date(2026, 1, 4)
+    assert test_min >= date(2026, 1, 7)
 
 
 def test_purged_kfold_yields_non_empty_splits() -> None:
@@ -181,9 +198,9 @@ def test_model_pipeline_fit_returns_artifact(tmp_path: Path) -> None:
         model_name="stock_ranker",
     )
 
-    assert artifact.model_name == "stock_ranker"
-    assert set(artifact.training_metadata.validation_metrics) == {"1d", "2d"}
-    restored = ModelPipeline.from_artifact(artifact)
+    assert artifact.manifest.model_name == "stock_ranker"
+    assert set(artifact.manifest.training_metadata.validation_metrics) == {"1d", "2d"}
+    restored = ModelPipeline.from_trained_artifact(artifact)
     assert restored.model.horizons == [1, 2]
 
 
@@ -215,17 +232,19 @@ def test_training_frame_from_store_pivots_factor_scores(tmp_path: Path) -> None:
             }
         ),
     )
-    frame = training_frame_from_store(
-        store=store,
-        factor_names=["factor_a", "factor_b"],
-        forward_returns=pl.DataFrame(
-            {
-                "date": [date(2026, 1, 1), date(2026, 1, 1)],
-                "symbol": ["AAA", "BBB"],
-                "forward_return_1d": [0.01, 0.02],
-            }
-        ).lazy(),
-    ).collect()
+    frame = pl.DataFrame(
+        training_frame_from_store(
+            store=store,
+            factor_names=["factor_a", "factor_b"],
+            forward_returns=pl.DataFrame(
+                {
+                    "date": [date(2026, 1, 1), date(2026, 1, 1)],
+                    "symbol": ["AAA", "BBB"],
+                    "forward_return_1d": [0.01, 0.02],
+                }
+            ).lazy(),
+        ).collect()
+    )
 
     assert set(frame.columns) == {
         "date",
@@ -295,9 +314,9 @@ def test_fit_and_save_model_from_store_returns_saved_artifact(tmp_path: Path) ->
         model=MultiHorizonRanker(horizons=[1], weights={"1d": 1.0}),
     )
 
-    assert run.artifact.model_name == "stock_ranker"
-    assert run.artifact.feature_schema.factor_columns == ["factor_a"]
-    assert run.artifact.ranker_spec.horizons == [1]
+    assert run.artifact.manifest.model_name == "stock_ranker"
+    assert run.artifact.manifest.feature_schema.factor_columns == ["factor_a"]
+    assert run.artifact.manifest.ranker_spec.horizons == [1]
     assert (
         run.artifact_path
         == tmp_path / "models" / "stock_ranker" / "store-train" / "artifact.joblib"

@@ -8,6 +8,7 @@ from qore_factor.fundamental.quality import (
     AccrualRatioFactor,
     AssetTurnoverFactor,
     CFOYieldFactor,
+    DebtToAssetRatioFactor,
     GrossMarginFactor,
     ROEStabilityFactor,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "AssetTurnoverFactor",
     "BookToPriceFactor",
     "CFOYieldFactor",
+    "DebtToAssetRatioFactor",
     "GrossMarginFactor",
     "NetProfitGrowthFactor",
     "ProfitGrowthPremiumFactor",

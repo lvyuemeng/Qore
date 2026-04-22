@@ -1,57 +1,53 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from typing import Literal
 
 import polars as pl
-from qore_core.calendar import TradingCalendar
-from qore_core.universe import Universe
+from qore_core.instrument import TradingSession
+
+from qore_runner.strategy import (
+    StrategyContext,
+    StrategyResult,
+    align_signals_to_universe,
+    tradeable_universe_frame,
+)
 
 
 @dataclass(slots=True)
 class CrossSectionalScreener:
     factor_weights: dict[str, float]
     name: str = "cross_sectional_screener"
-    compatible_sessions: frozenset[str] = frozenset({"nav", "auction"})
-    signal_freq: str = "monthly"
+    compatible_sessions: frozenset[TradingSession] = frozenset({"nav", "auction"})
+    signal_freq: Literal["event", "daily", "weekly", "monthly"] = "monthly"
 
     @property
     def required_columns(self) -> frozenset[str]:
         return frozenset(self.factor_weights)
 
-    def generate(
-        self,
-        lf: pl.LazyFrame,
-        news_scores: dict[str, float] | None,
-        universe: Universe,
-        date: date,
-        calendar: TradingCalendar,
-    ) -> pl.Series:
-        del news_scores
-        df = lf.collect()
-        weighted_terms = [
-            pl.col(column) * weight for column, weight in self.factor_weights.items()
-        ]
-        if not weighted_terms:
-            return pl.Series(name="signal", values=[float("nan")] * len(universe))
-        expr = weighted_terms[0]
-        for term in weighted_terms[1:]:
-            expr = expr + term
-        scored = df.select("symbol", expr.alias("signal"))
-        mapping = dict(
-            zip(
-                scored.get_column("symbol").to_list(),
-                scored.get_column("signal").to_list(),
-                strict=False,
-            )
+    def generate(self, context: StrategyContext) -> StrategyResult:
+        universe_frame = tradeable_universe_frame(
+            context.universe,
+            context.date,
+            context.calendar,
+            self.compatible_sessions,
         )
-        values = [
-            float(mapping.get(symbol, float("nan")))
-            if universe.get(symbol).session in self.compatible_sessions
-            and not universe.is_suspended(
-                symbol, calendar.fill_date(date, universe.get(symbol))
+        if not self.factor_weights:
+            return StrategyResult(
+                align_signals_to_universe(
+                    pl.DataFrame(
+                        schema={"symbol": pl.String, "signal": pl.Float64}
+                    ).lazy(),
+                    universe_frame,
+                )
             )
-            else float("nan")
-            for symbol in universe.symbols()
-        ]
-        return pl.Series(name="signal", values=values)
+        scored = context.factor_lf.select(
+            "symbol",
+            pl.sum_horizontal(
+                *(
+                    pl.col(column) * weight
+                    for column, weight in self.factor_weights.items()
+                )
+            ).alias("signal"),
+        )
+        return StrategyResult(align_signals_to_universe(scored, universe_frame))

@@ -118,7 +118,7 @@ class NewsPipeline:
         blended = 0.5 * sentiment_score + 0.5 * direction_score
         return max(min(blended * magnitude_score, 1.0), -1.0)
 
-    def _news_schema(self) -> dict[str, pl.DataType]:
+    def _news_schema(self) -> dict[str, pl.DataType | type[pl.DataType] | None]:
         return {
             "date": pl.Date,
             "symbol": pl.String,

@@ -9,19 +9,20 @@ from qore_backtest.metrics import compute_metrics
 from qore_backtest.simulate import fill_order
 from qore_core import QoreConfig, StockInstrument, TradingCalendar, Universe
 from qore_data.store.duckdb import QoreStore
-from qore_intelligence.combine import SignalCombiner
 from qore_intelligence.model.lgbm_rank import MultiHorizonRanker
 from qore_intelligence.model.workflow import fit_and_save_model
+from qore_intelligence.strategy import build_ranking_strategy
 from qore_runner.runner import StrategyRunner
 from qore_runner.sizer import EqualWeightSizer
 from qore_runner.strategies.crosssectional import CrossSectionalScreener
-from qore_runner.strategies.ranking import RankingStrategy
+from qore_runner.strategies.ranking import RankingStrategy, WeightedOverlayCombiner
 
 
-class StubPipeline:
-    def predict_score(self, factor_lf: pl.LazyFrame) -> pl.Series:
-        df = factor_lf.collect()
-        return pl.Series(name="score", values=df.get_column("factor_a").to_list())
+class StubScoreProvider:
+    required_columns = frozenset({"factor_a"})
+
+    def predict_scores(self, factor_lf: pl.LazyFrame) -> pl.LazyFrame:
+        return factor_lf.select("symbol", pl.col("factor_a").alias("signal"))
 
 
 def test_fill_order_stock_fills_next_day() -> None:
@@ -111,11 +112,12 @@ def test_backtest_engine_runs_end_to_end(tmp_path: Path) -> None:
     metrics = compute_metrics(result)
     assert result.nav.height == 1
     assert len(result.fills) == 1
+    assert result.diagnostics.height == 1
     assert "annualized_return" in metrics
     assert "win_rate" in metrics
 
 
-def test_backtest_engine_passes_news_scores_to_runner(tmp_path: Path) -> None:
+def test_backtest_engine_passes_signal_overlays_to_runner(tmp_path: Path) -> None:
     config = QoreConfig.model_validate(
         {
             "data": {
@@ -178,7 +180,8 @@ def test_backtest_engine_passes_news_scores_to_runner(tmp_path: Path) -> None:
     runner = StrategyRunner.from_config(
         config,
         RankingStrategy(
-            pipeline=StubPipeline(), combiner=SignalCombiner(news_alpha=0.8)
+            score_provider=StubScoreProvider(),
+            combiner=WeightedOverlayCombiner(alpha=0.8),
         ),
         EqualWeightSizer(top_k=1),
     )
@@ -192,6 +195,8 @@ def test_backtest_engine_passes_news_scores_to_runner(tmp_path: Path) -> None:
     result = engine.run(universe, date(2026, 4, 13), date(2026, 4, 13))
 
     assert list(result.positions[0]) == ["AAA.SH"]
+    assert result.diagnostics.get_column("fill_request_count").item() == 1
+    assert result.diagnostics.get_column("rejected_count").item() == 1
 
 
 def test_backtest_engine_runs_with_saved_model_registry_artifact(
@@ -301,7 +306,7 @@ def test_backtest_engine_runs_with_saved_model_registry_artifact(
     )
     runner = StrategyRunner.from_config(
         config,
-        RankingStrategy.from_config(config),
+        build_ranking_strategy(config),
         EqualWeightSizer(top_k=1),
     )
     engine = BacktestEngine.from_config(
@@ -314,3 +319,37 @@ def test_backtest_engine_runs_with_saved_model_registry_artifact(
     result = engine.run(universe, date(2026, 4, 13), date(2026, 4, 13))
 
     assert list(result.positions[0]) == ["BBB.SZ"]
+
+
+def test_strategy_runner_exposes_diagnostics() -> None:
+    universe = Universe(
+        [
+            StockInstrument(symbol="AAA", exchange="SH", industry="bank"),
+            StockInstrument(symbol="BBB", exchange="SZ", industry="tech"),
+        ]
+    )
+    runner = StrategyRunner.from_config(
+        QoreConfig(),
+        CrossSectionalScreener({"factor_a": 1.0}),
+        EqualWeightSizer(top_k=1),
+    )
+    factor_lf = pl.DataFrame(
+        {
+            "symbol": ["AAA", "BBB"],
+            "factor_a": [0.1, 0.9],
+        }
+    ).lazy()
+
+    result = runner.step(
+        factor_lf,
+        None,
+        universe,
+        date(2026, 4, 13),
+        {},
+        pl.Series("nav", [1.0]),
+        TradingCalendar.from_config(QoreConfig()),
+    )
+
+    assert result.diagnostics.eligible_count == 2
+    assert result.diagnostics.signal_count == 2
+    assert result.diagnostics.selected_count == 1

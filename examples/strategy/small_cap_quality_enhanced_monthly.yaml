@@ -1,0 +1,94 @@
+strategy:
+  name: small_cap_quality_enhanced_monthly
+  label: 小市值质量增强月频轮动策略
+  version: 1.0
+  market_scope:
+    benchmark: 8841431.WI
+    capital_profile:
+      type: medium_small
+      suggested_max_aum_cny: 50000000
+    backtest_reference:
+      start: 2010-01-01
+      end: 2026-04-21
+
+universe:
+  exclude_status:
+    - ST
+    - '*ST'
+    - 退市整理
+    - 暂停上市
+  exclude_new_listing_trading_days: 60
+  exclude_trade_blocked:
+    limit_up_untradeable:
+      pct_change_gte: 0.095
+      ask1_volume_eq: 0
+    limit_down_untradeable:
+      pct_change_lte: -0.095
+      bid1_volume_eq: 0
+
+selection:
+  rebalance_frequency: monthly
+  signal_generation_time: T-1_close
+  primary_factor:
+    name: total_market_cap
+    order: asc
+  top_n: 20
+  quality_filters:
+    - field: roe_ttm
+      operator: gt
+      value: 0
+    - field: debt_to_asset_ratio
+      operator: lt
+      value: 0.60
+    - field: operating_cash_flow
+      operator: gt
+      value: 0
+      source: latest_quarter
+  valuation_constraints:
+    - field: pe_ttm
+      operator: between
+      value:
+        lower_open: 0
+        upper_closed: 50
+    - field: pb
+      operator: between
+      value:
+        lower_open: 0
+        upper_closed: 3
+
+portfolio:
+  weighting: equal_weight
+  max_single_position: 0.10
+  capacity_checks:
+    - metric: target_position_to_daily_amount
+      operator: lte
+      value: 0.10
+      lookback_days: 20
+    - metric: min_daily_amount_cny
+      operator: gte
+      value: 10000000
+      lookback_days: 20
+
+execution:
+  stock_calendar:
+    rebalance_day: first_trading_day_of_month
+    execution_price: close
+    execution_delay_trading_days: 1
+
+risk_controls:
+  immediate_exit_rules:
+    - trigger: st_warning
+      action: next_open_liquidate
+    - trigger: audit_opinion
+      condition:
+        in:
+          - 无法表示意见
+          - 否定意见
+      action: exclude_from_universe
+      duration_months: 12
+  alerts:
+    - trigger: single_day_drop
+      condition:
+        pct_change_lte: -0.07
+        turnover_cny_gt: 5000000
+      action: emit_alert

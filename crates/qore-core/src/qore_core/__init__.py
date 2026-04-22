@@ -4,6 +4,7 @@ from qore_core.instrument import (
     DerivativeInstrument,
     FundInstrument,
     Instrument,
+    SessionInstrument,
     StockInstrument,
     TradingSession,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "FundInstrument",
     "Instrument",
     "QoreConfig",
+    "SessionInstrument",
     "StockInstrument",
     "TradingCalendar",
     "TradingSession",

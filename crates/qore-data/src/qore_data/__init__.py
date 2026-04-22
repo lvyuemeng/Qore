@@ -1,6 +1,7 @@
 from qore_data.fetch import (
     fetch_analyst_forecast,
     fetch_announcements,
+    fetch_audit_opinions,
     fetch_daily,
     fetch_fundamentals,
     fetch_minute,
@@ -8,19 +9,30 @@ from qore_data.fetch import (
     fetch_tick,
 )
 from qore_data.universe import (
+    CandidateFilter,
+    CandidateSort,
+    StockCandidateSpec,
+    StockSelectionPipeline,
+    StockSelectionScope,
     build_stock_universe_from_index,
-    evaluate_stock_categories,
     snapshot_index_constituents,
     snapshot_stock_analyst_forecasts,
     snapshot_stock_announcements,
+    snapshot_stock_audit_opinions,
     snapshot_stock_profiles,
+    snapshot_stock_statuses,
 )
 
 __all__ = [
+    "CandidateFilter",
+    "CandidateSort",
+    "StockCandidateSpec",
+    "StockSelectionPipeline",
+    "StockSelectionScope",
     "build_stock_universe_from_index",
-    "evaluate_stock_categories",
     "fetch_analyst_forecast",
     "fetch_announcements",
+    "fetch_audit_opinions",
     "fetch_daily",
     "fetch_fundamentals",
     "fetch_minute",
@@ -29,5 +41,7 @@ __all__ = [
     "snapshot_index_constituents",
     "snapshot_stock_analyst_forecasts",
     "snapshot_stock_announcements",
+    "snapshot_stock_audit_opinions",
     "snapshot_stock_profiles",
+    "snapshot_stock_statuses",
 ]

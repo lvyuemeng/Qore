@@ -15,10 +15,9 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Final
+from typing import Any, Final
 
 import polars as pl
-from pyparsing import Any
 
 from quant_trade.client.traits import (
     BaseBuilder,
@@ -39,6 +38,20 @@ EASTMONEY_FINANCE_API: Final[str] = (
 EASTMONEY_KLINE_API: Final[str] = (
     "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 )
+QUARTER_END_MONTH_DAYS: Final[dict[int, str]] = {
+    1: "03-31",
+    2: "06-30",
+    3: "09-30",
+    4: "12-31",
+}
+KLINE_ADJUST_MAP: Final[dict[str, str]] = {"qfq": "1", "hfq": "2", "": "0"}
+KLINE_PERIOD_MAP: Final[dict[str, str]] = {
+    "daily": "101",
+    "weekly": "102",
+    "monthly": "103",
+}
+DEFAULT_HIST_START: Final[date] = date(1970, 1, 1)
+DEFAULT_HIST_END: Final[date] = date(2050, 1, 1)
 
 # =============================================================================
 # Helper Functions
@@ -55,8 +68,7 @@ def _build_quarterly_date(year: int, quarter: int) -> str:
     Returns:
         Formatted date string (e.g., "2024-03-31")
     """
-    quarter_end_months = {1: "03-31", 2: "06-30", 3: "09-30", 4: "12-31"}
-    month, day = quarter_end_months[quarter].split("-")
+    month, day = QUARTER_END_MONTH_DAYS[quarter].split("-")
     return f"{year}-{month}-{day}"
 
 
@@ -101,21 +113,26 @@ def _build_kline_params(
         Tuple of (secid, params_dict)
     """
     market_code = 1 if symbol.startswith("6") else 0
-    adjust_dict = {"qfq": "1", "hfq": "2", "": "0"}
-    period_dict = {"daily": "101", "weekly": "102", "monthly": "103"}
 
     params = {
         "fields1": "f1,f2,f3,f4,f5,f6",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
         "ut": "7eea3edcaed734bea9cbfc24409ed989",
-        "klt": period_dict[period],
-        "fqt": adjust_dict[adjust],
+        "klt": KLINE_PERIOD_MAP[period],
+        "fqt": KLINE_ADJUST_MAP[adjust],
         "secid": f"{market_code}.{symbol}",
         "beg": start_date,
         "end": end_date,
     }
 
     return f"{market_code}.{symbol}", params
+
+
+def _resolve_hist_date_bounds(
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[date, date]:
+    return start_date or DEFAULT_HIST_START, end_date or DEFAULT_HIST_END
 
 
 # =============================================================================
@@ -210,7 +227,7 @@ class EastMoneyParser:
         return pl.DataFrame(data, infer_schema_length=None)
 
 
-class FundemantalParser(EastMoneyParser):
+class FundamentalParser(EastMoneyParser):
     """EastMoney-specific Parser - extends BaseParser.
 
     DATA_PATH configured to extract data from EastMoney API response.
@@ -249,6 +266,9 @@ class FundemantalParser(EastMoneyParser):
         """
         PAGES_KEY: str = "pages"
         return raw.get("result", {}).get(PAGES_KEY, 1)
+
+
+FundemantalParser = FundamentalParser
 
 
 class KlineParser(EastMoneyParser):
@@ -520,6 +540,33 @@ class ReportPipe:
         self._fetcher = fetcher
         self._config = config
 
+    async def _fetch_rows(self, params: dict[str, str]) -> list[dict[str, Any]]:
+        parser = FundamentalParser()
+        raw = await self._fetcher.fetch_once(self._config.url, params)
+        if not raw:
+            log.error("Failed to fetch raw data")
+            return []
+
+        data = parser.parse(raw)
+        if not data:
+            log.error("Failed to parse raw data")
+            return []
+
+        total_pages = parser.get_total_pages(raw)
+        log.info(f"Total pages to fetch: {total_pages}")
+        if total_pages == 1:
+            return data
+
+        pages_to_fetch = list(range(2, total_pages + 1))
+        page_results = await self._fetcher.fetch_pages_concurrent(
+            self._config.url,
+            params,
+            pages_to_fetch,
+        )
+        for page_raw in page_results:
+            data.extend(parser.parse(page_raw))
+        return data
+
     async def fetch_one(self, year: int, quarter: Quarter) -> pl.DataFrame:
         """Fetch quarterly report data.
 
@@ -535,35 +582,13 @@ class ReportPipe:
         params = _build_quarterly_params(self._config.report_name, formatted_date)
 
         # Create parser and builder instances
-        parser = FundemantalParser()
         builder = self._config.builder_class()
-
-        fetcher = self._fetcher
-        raw = await fetcher.fetch_once(self._config.url, params)
-        if not raw:
-            log.error("Failed to fetch raw data")
-            return pl.DataFrame()
-        data = parser.parse(raw)
+        data = await self._fetch_rows(params)
         if not data:
-            log.error("Failed to parse raw data")
             return pl.DataFrame()
-
-        total_pages = parser.get_total_pages(raw)
-        log.info(f"Total pages to fetch: {total_pages}")
-
-        # Fetch remaining pages concurrently
-        if total_pages > 1:
-            pages_to_fetch = list(range(2, total_pages + 1))
-            page_results = await fetcher.fetch_pages_concurrent(
-                self._config.url, params, pages_to_fetch
-            )
-
-            for page_raw in page_results:
-                page_data = parser.parse(page_raw)
-                data.extend(page_data)
 
         # Build DataFrame
-        df = parser.clean(data)
+        df = FundamentalParser().clean(data)
         df = builder.normalize(df)
         return df
 
@@ -647,20 +672,23 @@ class EastMoney:
             max_retries: Number of retry attempts on failure
         """
         self._fetcher = EastMoneyFetcher(max_retries=max_retries)
+        self._report_configs: dict[str, ReportConfig] = {
+            "income": ReportConfig(
+                report_name="RPT_DMSK_FN_INCOME",
+                builder_class=IncomeBuilder,
+            ),
+            "balance": ReportConfig(
+                report_name="RPT_DMSK_FN_BALANCE",
+                builder_class=BalanceSheetBuilder,
+            ),
+            "cashflow": ReportConfig(
+                report_name="RPT_DMSK_FN_CASHFLOW",
+                builder_class=CashFlowBuilder,
+            ),
+        }
 
-        # Create report configurations
-        self._income_config = ReportConfig(
-            report_name="RPT_DMSK_FN_INCOME",
-            builder_class=IncomeBuilder,
-        )
-        self._balance_config = ReportConfig(
-            report_name="RPT_DMSK_FN_BALANCE",
-            builder_class=BalanceSheetBuilder,
-        )
-        self._cashflow_config = ReportConfig(
-            report_name="RPT_DMSK_FN_CASHFLOW",
-            builder_class=CashFlowBuilder,
-        )
+    def _get_report_config(self, name: str) -> ReportConfig:
+        return self._report_configs[name]
 
     def _report(
         self, config: ReportConfig, year: int, quarter: Quarter
@@ -671,31 +699,31 @@ class EastMoney:
         return self._fetcher.run(pipe.fetch_one(year, quarter))
 
     def quarterly_income(self, year: int, quarter: Quarter) -> pl.DataFrame:
-        return self._report(self._income_config, year, quarter)
+        return self._report(self._get_report_config("income"), year, quarter)
 
     def quarterly_balance(self, year: int, quarter: Quarter) -> pl.DataFrame:
-        return self._report(self._balance_config, year, quarter)
+        return self._report(self._get_report_config("balance"), year, quarter)
 
     def quarterly_cashflow(self, year: int, quarter: Quarter) -> pl.DataFrame:
-        return self._report(self._cashflow_config, year, quarter)
+        return self._report(self._get_report_config("cashflow"), year, quarter)
 
     def _batch_report(
         self, config: ReportConfig, start: date, end: date
     ) -> list[pl.DataFrame]:
-        log.info(f"Fetching quarterly income from {start} to {end}")
+        log.info(f"Fetching {config.report_name} from {start} to {end}")
         pipe = ReportPipe(self._fetcher, config)
         date_range = quarter_range(start_date=start, end_date=end)
         tasks = [pipe.fetch_one(year, quarter) for year, quarter in date_range]
         return self._fetcher.run(asyncio.gather(*tasks))
 
     def batch_quarterly_income(self, start: date, end: date) -> list[pl.DataFrame]:
-        return self._batch_report(self._income_config, start, end)
+        return self._batch_report(self._get_report_config("income"), start, end)
 
     def batch_quarterly_balance(self, start: date, end: date) -> list[pl.DataFrame]:
-        return self._batch_report(self._balance_config, start, end)
+        return self._batch_report(self._get_report_config("balance"), start, end)
 
     def batch_quarterly_cashflow(self, start: date, end: date) -> list[pl.DataFrame]:
-        return self._batch_report(self._cashflow_config, start, end)
+        return self._batch_report(self._get_report_config("cashflow"), start, end)
 
     def batch_stock_hist(
         self,
@@ -719,10 +747,7 @@ class EastMoney:
         """
         log.info(f"Fetching stock historical data for {symbols}")
         pipe = KlinePipe(self._fetcher)
-        if start_date is None:
-            start_date = date(1970, 1, 1)
-        if end_date is None:
-            end_date = date(2050, 1, 1)
+        start_date, end_date = _resolve_hist_date_bounds(start_date, end_date)
         tasks = [
             pipe.fetch_one(symbol, start_date, end_date, period, adjust)
             for symbol in symbols

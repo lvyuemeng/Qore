@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Literal
 
 import duckdb
 import polars as pl
@@ -13,7 +13,9 @@ from qore_core.config import QoreConfig
 
 from qore_data.store.schema import DATASETS, Dataset
 
-_TYPE_PREDICATES: tuple[tuple[Any, pl.DataType, str], ...] = (
+StoreBackend = Literal["auto", "parquet", "duckdb"]
+
+_TYPE_PREDICATES = (
     (pa_types.is_date32, pl.Date, "DATE"),
     (pa_types.is_string, pl.String, "VARCHAR"),
     (pa_types.is_float64, pl.Float64, "DOUBLE"),
@@ -32,7 +34,7 @@ def _polars_schema(dataset: Dataset) -> dict[str, pl.DataType]:
 def _polars_type(data_type: pa.DataType) -> pl.DataType:
     for predicate, polars_type, _ in _TYPE_PREDICATES:
         if predicate(data_type):
-            return polars_type
+            return polars_type()
     msg = f"Unsupported type in schema mapping: {data_type}"
     raise TypeError(msg)
 
@@ -52,6 +54,7 @@ class QoreStore:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._parquet_root.mkdir(parents=True, exist_ok=True)
         self._conn = duckdb.connect(str(self._db_path))
+        self.register_all_views()
 
     @classmethod
     def from_config(cls, config: QoreConfig) -> QoreStore:
@@ -74,7 +77,7 @@ class QoreStore:
                 continue
             glob_path = (root / "**/*.parquet").as_posix()
             self._conn.execute(
-                f"CREATE OR REPLACE VIEW {dataset_name} AS SELECT * FROM read_parquet('{glob_path}', union_by_name = true, hive_partitioning = true)"
+                f"CREATE OR REPLACE VIEW {dataset_name} AS SELECT * FROM read_parquet('{glob_path}', union_by_name = true, hive_partitioning = false)"
             )
 
     def read(
@@ -82,6 +85,7 @@ class QoreStore:
         dataset: str,
         filters: dict[str, object] | None = None,
         columns: list[str] | None = None,
+        backend: StoreBackend = "auto",
     ) -> pl.LazyFrame:
         dataset_info = self._dataset(dataset)
         schema_names = set(_polars_schema(dataset_info))
@@ -97,16 +101,73 @@ class QoreStore:
             if unknown_filters:
                 msg = f"Unknown filter column for {dataset}: {unknown_filters[0]}"
                 raise KeyError(msg)
+        resolved_backend = "parquet" if backend == "auto" else backend
+        if resolved_backend == "duckdb":
+            return self._read_duckdb(dataset, dataset_info, filters, columns)
+        return self._read_parquet(dataset, dataset_info, filters, columns)
+
+    def read_parquet(
+        self,
+        dataset: str,
+        filters: dict[str, object] | None = None,
+        columns: list[str] | None = None,
+    ) -> pl.LazyFrame:
+        return self.read(dataset, filters=filters, columns=columns, backend="parquet")
+
+    def read_duckdb(
+        self,
+        dataset: str,
+        filters: dict[str, object] | None = None,
+        columns: list[str] | None = None,
+    ) -> pl.LazyFrame:
+        return self.read(dataset, filters=filters, columns=columns, backend="duckdb")
+
+    def storage_priority(self) -> str:
+        return "parquet"
+
+    def query_priority(self) -> str:
+        return "duckdb"
+
+    def _read_parquet(
+        self,
+        dataset: str,
+        dataset_info: Dataset,
+        filters: dict[str, object] | None,
+        columns: list[str] | None,
+    ) -> pl.LazyFrame:
         root = self._dataset_root(dataset)
         if not root.exists():
             return pl.DataFrame(schema=_polars_schema(dataset_info)).lazy()
         lf = pl.scan_parquet((root / "**/*.parquet").as_posix())
-        if columns is not None:
-            lf = lf.select(columns)
         if filters:
             for key, value in filters.items():
                 lf = lf.filter(pl.col(key) == value)
+        if columns is not None:
+            lf = lf.select(columns)
         return lf
+
+    def _read_duckdb(
+        self,
+        dataset: str,
+        dataset_info: Dataset,
+        filters: dict[str, object] | None,
+        columns: list[str] | None,
+    ) -> pl.LazyFrame:
+        root = self._dataset_root(dataset)
+        if not root.exists():
+            return pl.DataFrame(schema=_polars_schema(dataset_info)).lazy()
+        selected_columns = columns or [field.name for field in dataset_info.schema]
+        projected = ", ".join(_quote_identifier(column) for column in selected_columns)
+        params: list[object] = []
+        predicates: list[str] = []
+        if filters:
+            for key, value in filters.items():
+                predicates.append(f"{_quote_identifier(key)} = ?")
+                params.append(value)
+        where_clause = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+        query = f"SELECT {projected} FROM {_quote_identifier(dataset)}{where_clause}"
+        table = self._conn.execute(query, params).to_arrow_table()
+        return pl.DataFrame(pl.from_arrow(table)).lazy()
 
     def _with_partitions(self, dataset: Dataset, df: pl.DataFrame) -> pl.DataFrame:
         result = df
@@ -132,7 +193,7 @@ class QoreStore:
 
     def write(self, dataset: str, df: pl.DataFrame | pl.LazyFrame) -> None:
         dataset_info = self._dataset(dataset)
-        materialized = df.collect() if isinstance(df, pl.LazyFrame) else df
+        materialized = _materialize_dataframe(df)
         output = self._deduplicate_existing(
             dataset,
             self._validate_and_prepare(dataset_info, materialized).unique(
@@ -157,8 +218,8 @@ class QoreStore:
         schema = reader.schema
         batches = list(reader)
         if not batches:
-            return pl.from_arrow(pa.Table.from_batches([], schema=schema)).lazy()
-        return pl.from_arrow(pa.Table.from_batches(batches, schema=schema)).lazy()
+            return _from_arrow_table(pa.Table.from_batches([], schema=schema)).lazy()
+        return _from_arrow_table(pa.Table.from_batches(batches, schema=schema)).lazy()
 
     def close(self) -> None:
         self._conn.close()
@@ -216,7 +277,7 @@ class QoreStore:
             return df
 
         keys = dataset_info.dedup_keys
-        existing = self.read(dataset, columns=keys).collect()
+        existing = _materialize_dataframe(self.read(dataset, columns=keys))
         if existing.is_empty():
             return df
 
@@ -225,3 +286,24 @@ class QoreStore:
         if not any(mask):
             return df.head(0)
         return df.filter(pl.Series(name="_keep", values=mask))
+
+
+def _materialize_dataframe(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:
+    collected = df.collect() if isinstance(df, pl.LazyFrame) else df
+    if not isinstance(collected, pl.DataFrame):
+        msg = "Expected DataFrame during store materialization."
+        raise TypeError(msg)
+    return collected
+
+
+def _from_arrow_table(table: pa.Table) -> pl.DataFrame:
+    frame = pl.from_arrow(table)
+    if not isinstance(frame, pl.DataFrame):
+        msg = "Expected DataFrame from Arrow conversion."
+        raise TypeError(msg)
+    return frame
+
+
+def _quote_identifier(name: str) -> str:
+    escaped = name.replace('"', '""')
+    return f'"{escaped}"'

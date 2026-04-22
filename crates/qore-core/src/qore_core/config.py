@@ -13,6 +13,13 @@ class DataConfig(BaseModel):
     eastmoney_concurrency: int = 8
     eastmoney_delay_min: float = 0.2
     eastmoney_delay_max: float = 0.5
+    eastmoney_timeout: float = 15.0
+    eastmoney_max_retries: int = 3
+    eastmoney_retry_budget: int = 20
+    eastmoney_cooldown_min: float = 1.5
+    eastmoney_cooldown_max: float = 8.0
+    eastmoney_retry_backoff_min: float = 0.5
+    eastmoney_retry_backoff_max: float = 2.0
 
 
 class IntelligenceConfig(BaseModel):

@@ -4,33 +4,30 @@ from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 import polars as pl
-from qore_core.universe import Universe
 
 
 @runtime_checkable
 class PositionSizer(Protocol):
-    def size(self, signals: pl.Series, universe: Universe) -> dict[str, float]: ...
+    required_columns: frozenset[str]
+
+    def size(self, signals: pl.DataFrame) -> dict[str, float]: ...
 
 
 @dataclass(slots=True)
 class EqualWeightSizer:
     top_k: int
     max_weight: float = 0.05
+    required_columns: frozenset[str] = frozenset()
 
-    def size(self, signals: pl.Series, universe: Universe) -> dict[str, float]:
-        ranked = [
-            (symbol, float(signal))
-            for symbol, signal in zip(
-                universe.symbols(), signals.to_list(), strict=False
-            )
-            if signal is not None and signal == signal
-        ]
-        ranked.sort(key=lambda item: item[1], reverse=True)
-        selected = ranked[: self.top_k]
-        if not selected:
+    def size(self, signals: pl.DataFrame) -> dict[str, float]:
+        selected = _selected_signals(signals, self.top_k)
+        if selected.is_empty():
             return {}
-        weight = min(1.0 / len(selected), self.max_weight)
-        return {symbol: weight for symbol, _ in selected}
+        weight = min(1.0 / selected.height, self.max_weight)
+        return _weights_by_symbol(
+            selected.with_columns(pl.lit(weight).alias("weight")),
+            weight_col="weight",
+        )
 
 
 @dataclass(slots=True)
@@ -40,6 +37,10 @@ class VolScaledSizer:
     max_weight: float = 0.10
     volatility: dict[str, float] = field(default_factory=dict)
 
+    @property
+    def required_columns(self) -> frozenset[str]:
+        return frozenset({self.vol_col})
+
     def with_volatility(self, volatility: dict[str, float]) -> VolScaledSizer:
         return VolScaledSizer(
             top_k=self.top_k,
@@ -48,35 +49,74 @@ class VolScaledSizer:
             volatility=dict(volatility),
         )
 
-    def size(self, signals: pl.Series, universe: Universe) -> dict[str, float]:
-        ranked = [
-            (symbol, float(signal))
-            for symbol, signal in zip(
-                universe.symbols(), signals.to_list(), strict=False
-            )
-            if signal is not None and signal == signal
-        ]
-        ranked.sort(key=lambda item: item[1], reverse=True)
-        selected = ranked[: self.top_k]
-        if not selected:
+    def size(self, signals: pl.DataFrame) -> dict[str, float]:
+        selected = _selected_signals(signals, self.top_k)
+        if selected.is_empty():
             return {}
-
-        inverse_vol = {
-            symbol: self._inverse_volatility(symbol) for symbol, _ in selected
-        }
-        total = sum(inverse_vol.values())
-        normalized = {
-            symbol: value / total
-            for symbol, value in inverse_vol.items()
-            if total > 0.0
-        }
+        prepared = self._with_volatility(selected).with_columns(
+            pl.when(pl.col(self.vol_col).cast(pl.Float64, strict=False) > 0.0)
+            .then(1.0 / pl.col(self.vol_col).cast(pl.Float64, strict=False))
+            .otherwise(1.0)
+            .alias("inverse_vol")
+        )
+        total = prepared.select(pl.col("inverse_vol").sum().alias("total")).item()
+        total_value = float(total) if isinstance(total, (int, float)) else 0.0
+        if total_value <= 0.0:
+            return {}
+        normalized = _weights_by_symbol(
+            prepared.with_columns(
+                (pl.col("inverse_vol") / total_value).alias("weight")
+            ),
+            weight_col="weight",
+        )
         return _cap_and_renormalize(normalized, self.max_weight)
 
-    def _inverse_volatility(self, symbol: str) -> float:
-        volatility = float(self.volatility.get(symbol, 1.0))
-        if volatility <= 0.0:
-            return 1.0
-        return 1.0 / volatility
+    def _with_volatility(self, signals: pl.DataFrame) -> pl.DataFrame:
+        if not self.volatility:
+            return signals.with_columns(
+                pl.col(self.vol_col).cast(pl.Float64, strict=False).fill_null(1.0)
+            )
+        overrides = pl.DataFrame(
+            {
+                "symbol": list(self.volatility),
+                "override_volatility": list(self.volatility.values()),
+            },
+            schema={"symbol": pl.String, "override_volatility": pl.Float64},
+        )
+        return (
+            signals.join(overrides, on="symbol", how="left")
+            .with_columns(
+                pl.coalesce(
+                    "override_volatility",
+                    pl.col(self.vol_col).cast(pl.Float64, strict=False),
+                    pl.lit(1.0),
+                ).alias(self.vol_col)
+            )
+            .drop("override_volatility")
+        )
+
+
+def _selected_signals(signals: pl.DataFrame, top_k: int) -> pl.DataFrame:
+    if (
+        signals.is_empty()
+        or "symbol" not in signals.columns
+        or "signal" not in signals.columns
+    ):
+        return pl.DataFrame(schema={"symbol": pl.String, "signal": pl.Float64})
+    return pl.DataFrame(
+        signals.lazy()
+        .filter(pl.col("signal").is_not_null() & pl.col("signal").is_finite())
+        .sort("signal", descending=True)
+        .head(top_k)
+        .collect()
+    )
+
+
+def _weights_by_symbol(frame: pl.DataFrame, weight_col: str) -> dict[str, float]:
+    return {
+        str(symbol): float(weight)
+        for symbol, weight in frame.select("symbol", weight_col).iter_rows()
+    }
 
 
 def _cap_and_renormalize(
