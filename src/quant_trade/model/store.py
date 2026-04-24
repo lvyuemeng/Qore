@@ -82,39 +82,44 @@ class ModelMeta:
             description=data.get("description", ""),
         )
 
+
 @dataclass(slots=True)
 class ModelCard[T]:
     """
     Generic container for model + metadata.
-    
+
     Type Parameters:
         T: The type of the model being stored
-    
+
     Attributes:
         model: The actual model object
         meta: Associated metadata
     """
+
     model: T
     meta: ModelMeta
+
 
 @runtime_checkable
 class Storage[T](Protocol):
     """
     Storage protocol interface.
-    
+
     All storage backends must implement these methods.
     """
 
     @abstractmethod
-    def save(self, name: str, container: ModelCard[T], *, overwrite: bool = False) -> None:
+    def save(
+        self, name: str, container: ModelCard[T], *, overwrite: bool = False
+    ) -> None:
         """
         Save a model container.
-        
+
         Args:
             name: Unique identifier for the model
             container: The model container to store
             overwrite: If True, overwrite existing model with same name
-            
+
         Raises:
             ModelExistsError: If model exists and overwrite=False
             StorageBackendError: If storage operation fails
@@ -125,13 +130,13 @@ class Storage[T](Protocol):
     def load(self, name: str) -> T:
         """
         Load a model container.
-        
+
         Args:
             name: Unique identifier for the model
-            
+
         Returns:
             The stored model container
-            
+
         Raises:
             ModelNotFoundError: If model doesn't exist
             StorageBackendError: If load operation fails
@@ -147,7 +152,7 @@ class Storage[T](Protocol):
     def delete(self, name: str) -> None:
         """
         Delete a model.
-        
+
         Raises:
             ModelNotFoundError: If model doesn't exist
         """
@@ -162,10 +167,10 @@ class Storage[T](Protocol):
     def get_meta(self, name: str) -> ModelMeta:
         """
         Get metadata without loading the full model.
-        
+
         Args:
             name: Model identifier
-            
+
         Returns:
             Model metadata
         """
@@ -175,17 +180,17 @@ class Storage[T](Protocol):
 class FSStorage[T]:
     """
     File-based storage implementation using pickle.
-    
+
     Stores models as .pkl files and metadata as .json files for
     efficient metadata retrieval without full model loading.
-    
+
     Thread-safe for concurrent operations.
     """
 
     def __init__(self, base_dir: Path | str, *, separate_meta: bool = True):
         """
         Initialize file system storage.
-        
+
         Args:
             base_dir: Directory to store models
             separate_meta: If True, store metadata separately for fast access
@@ -198,7 +203,7 @@ class FSStorage[T]:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
         if self.separate_meta:
-            self._meta_dir = self.base_dir / '.meta'
+            self._meta_dir = self.base_dir / ".meta"
             self._meta_dir.mkdir(exist_ok=True)
 
     def _model_path(self, name: str) -> Path:
@@ -211,13 +216,17 @@ class FSStorage[T]:
             return self._meta_dir / f"{name}.json"
         return self._model_path(name)
 
-    def save(self, name: str, container: ModelCard[T], *, overwrite: bool = False) -> None:
+    def save(
+        self, name: str, container: ModelCard[T], *, overwrite: bool = False
+    ) -> None:
         """Save model to filesystem."""
         with self._lock:
             model_path = self._model_path(name)
 
             if not overwrite and model_path.exists():
-                raise MemoryError(f"Model '{name}' already exists. Use overwrite=True to replace.")
+                raise MemoryError(
+                    f"Model '{name}' already exists. Use overwrite=True to replace."
+                )
 
             try:
                 # Save model
@@ -300,7 +309,7 @@ class FSStorage[T]:
                 shutil.rmtree(self.base_dir)
                 self.base_dir.mkdir(parents=True, exist_ok=True)
                 if self.separate_meta:
-                    self._meta_dir = self.base_dir / '.meta'
+                    self._meta_dir = self.base_dir / ".meta"
                     self._meta_dir.mkdir(exist_ok=True)
 
     def get_size(self, name: str) -> int:
@@ -314,7 +323,7 @@ class FSStorage[T]:
 class ModelStore:
     """
     High-level model storage manager.
-    
+
     Provides a unified interface for model lifecycle management
     with support for tagging, searching, and versioning.
     """
@@ -322,7 +331,7 @@ class ModelStore:
     def __init__(self, storage: Storage[Any]):
         """
         Initialize model store.
-        
+
         Args:
             storage: Storage backend (defaults to InMemoryStorage)
         """
@@ -332,11 +341,11 @@ class ModelStore:
         self,
         card: ModelCard[T],
         *,
-        overwrite:bool=False,
+        overwrite: bool = False,
     ):
         """
         Register a new model with metadata.
-        
+
         Args:
             model: The model object to store
             name: Unique identifier
@@ -348,7 +357,7 @@ class ModelStore:
             description: Human-readable description
             version: Model version
             overwrite: Whether to overwrite existing
-            
+
         Returns:
             The created model container
         """
@@ -396,7 +405,7 @@ class ModelStore:
         """Export model metadata to JSON file."""
         meta = self._storage.get_meta(name)
         path = Path(path)
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             json.dump(meta.to_dict(), f, indent=2)
 
     def __iter__(self) -> Iterator[str]:

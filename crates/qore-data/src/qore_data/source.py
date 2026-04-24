@@ -4,7 +4,8 @@ from datetime import date
 from typing import Protocol
 
 import polars as pl
-from qore_core.instrument import DerivativeInstrument, FundInstrument, StockInstrument
+
+from qore_data.instrument import DerivativeInstrument, FundInstrument, StockInstrument
 
 
 class StockSource(Protocol):

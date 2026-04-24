@@ -5,7 +5,6 @@ description = "Data layer for Qore"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "qore-core",
     "duckdb>=1.0",
     "httpx[http2]>=0.28",
     "polars>=1.0",

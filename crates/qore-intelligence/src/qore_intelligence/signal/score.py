@@ -5,9 +5,9 @@ from datetime import date
 from math import exp, log
 
 import polars as pl
-from qore_core.config import QoreConfig
 from qore_data.store.duckdb import QoreStore
 
+from qore_intelligence import IntelligenceSettings
 from qore_intelligence.signal.llm import LLMExtractor
 from qore_intelligence.signal.sentiment import FinBERT
 from qore_intelligence.signal.triage import Triage
@@ -29,13 +29,17 @@ class NewsPipeline:
     half_life: int
 
     @classmethod
-    def from_config(cls, config: QoreConfig, store: QoreStore) -> NewsPipeline:
+    def from_settings(
+        cls,
+        settings: IntelligenceSettings,
+        store: QoreStore,
+    ) -> NewsPipeline:
         return cls(
             triage=Triage(),
-            sentiment=FinBERT.from_config(config),
-            llm=LLMExtractor.from_config(config),
+            sentiment=FinBERT.from_settings(settings),
+            llm=LLMExtractor.from_settings(settings),
             store=store,
-            half_life=config.intelligence.news_score_half_life_days,
+            half_life=settings.news_score_half_life_days,
         )
 
     async def run(self, trading_date: date) -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from qore_core import StockInstrument
+from qore_data import StockInstrument
 from qore_data.source import StockSource
 from qore_data.store.duckdb import QoreStore
 from qore_data.universe import (
@@ -13,6 +13,8 @@ from qore_data.universe import (
     CandidateSort,
     StockCandidateSpec,
     StockSelectionPipeline,
+    Universe,
+    build_stock_universe_frame_from_index,
     build_stock_universe_from_index,
     snapshot_index_constituents,
     snapshot_stock_analyst_forecasts,
@@ -229,9 +231,27 @@ async def test_build_stock_universe_from_index_enriches_industry(
         index_symbol="000300.SH",
         as_of=date(2026, 4, 19),
     )
+    frame = universe.collect().sort("symbol")
+    rows = {row["symbol"]: row for row in frame.iter_rows(named=True)}
 
-    assert universe.get("600519.SH").industry == "beverage"
-    assert universe.get("300750.SZ").industry == "new_energy"
+    assert rows["600519.SH"]["industry"] == "beverage"
+    assert rows["300750.SZ"]["industry"] == "new_energy"
+
+
+@pytest.mark.asyncio
+async def test_build_stock_universe_frame_from_index_is_frame_native(
+    tmp_path: Path,
+) -> None:
+    store = QoreStore(str(tmp_path / "qore.duckdb"), str(tmp_path / "raw"))
+    frame = await build_stock_universe_frame_from_index(
+        StubStockSource(),
+        store,
+        index_symbol="000300.SH",
+        as_of=date(2026, 4, 19),
+    )
+
+    assert set(frame.columns) >= {"symbol", "exchange", "industry", "price_limit_pct"}
+    assert frame.get_column("symbol").to_list() == ["600519.SH", "300750.SZ"]
 
 
 def test_evaluate_stock_categories_aggregates_universe_views(tmp_path: Path) -> None:
@@ -430,13 +450,85 @@ def test_build_selection_stock_universe_filters_untradeable(tmp_path: Path) -> N
         ),
     )
 
-    universe = StockSelectionPipeline.from_index(
+    universe = Universe.from_frame(
+        StockSelectionPipeline.from_index(
+            store,
+            index_symbol="000300.SH",
+            as_of=as_of,
+        ).universe_frame(StockCandidateSpec()),
+        symbol_col="symbol",
+        tradeable_col=None,
+        suspended_col="is_suspended",
+        session_marker="auction",
+    )
+
+    assert universe.symbols() == ["300750.SZ"]
+
+
+def test_build_selection_stock_universe_frame_filters_untradeable(
+    tmp_path: Path,
+) -> None:
+    store = QoreStore(str(tmp_path / "qore.duckdb"), str(tmp_path / "raw"))
+    as_of = date(2026, 4, 19)
+    store.write(
+        "index_constituents",
+        pl.DataFrame(
+            {
+                "as_of": [as_of, as_of],
+                "index_symbol": ["000300.SH", "000300.SH"],
+                "symbol": ["600519.SH", "300750.SZ"],
+                "exchange": ["SH", "SZ"],
+                "industry": ["food", "battery"],
+            }
+        ),
+    )
+    store.write(
+        "stock_profiles",
+        pl.DataFrame(
+            {
+                "as_of": [as_of, as_of],
+                "symbol": ["600519.SH", "300750.SZ"],
+                "short_name": ["*ST茅台", "宁德时代"],
+                "exchange": ["SH", "SZ"],
+                "industry": ["beverage", "new_energy"],
+                "board": ["MainBoard", "ChiNext"],
+                "listing_date": [date(2020, 1, 1), date(2020, 1, 1)],
+                "total_market_cap": [100.0, 200.0],
+                "float_market_cap": [80.0, 150.0],
+                "total_shares": [10.0, 20.0],
+                "float_shares": [8.0, 15.0],
+                "is_st": [True, False],
+            }
+        ),
+    )
+    store.write(
+        "stock_ohlcv",
+        pl.DataFrame(
+            {
+                "date": [as_of, as_of],
+                "symbol": ["600519.SH", "300750.SZ"],
+                "open": [10.0, 20.0],
+                "high": [10.5, 20.5],
+                "low": [9.8, 19.5],
+                "close": [10.1, 20.2],
+                "volume": [100, 200],
+                "amount": [1000.0, 2000.0],
+                "adj_factor": [1.0, 1.0],
+                "is_suspended": [False, False],
+                "limit_up": [False, False],
+                "limit_down": [False, False],
+            }
+        ),
+    )
+
+    frame = StockSelectionPipeline.from_index(
         store,
         index_symbol="000300.SH",
         as_of=as_of,
-    ).to_universe(StockCandidateSpec())
+    ).universe_frame(StockCandidateSpec())
 
-    assert universe.symbols() == ["300750.SZ"]
+    assert frame.columns == ["symbol", "is_suspended"]
+    assert frame.get_column("symbol").to_list() == ["300750.SZ"]
 
 
 def test_build_stock_selection_frame_joins_status_metadata_and_fundamentals(

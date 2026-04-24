@@ -1,121 +1,182 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import TypeVar
+from typing import Literal
 
 import polars as pl
-from qore_core.calendar import TradingCalendar
-from qore_core.config import QoreConfig
-from qore_core.instrument import SessionInstrument
-from qore_core.universe import Universe
 
-from qore_runner.risk import RiskManager
+from qore_runner import RunnerSettings
+from qore_runner.decision import DecisionPipeline, StrategyDecision
 from qore_runner.sizer import PositionSizer
 from qore_runner.strategy import Strategy, StrategyContext
-
-TInstrument = TypeVar("TInstrument", bound=SessionInstrument)
 
 
 @dataclass(frozen=True, slots=True)
 class RunnerDiagnostics:
-    eligible_count: int
+    candidate_count: int
     signal_count: int
     selected_count: int
-    risk_blocked: bool
+    non_selected_count: int
+    drawdown_blocked: bool
 
 
 @dataclass(slots=True)
 class TargetPortfolio:
     date: date
-    weights: dict[str, float]
+    weights_frame: pl.DataFrame
     signals: pl.DataFrame
-    risk_triggered: bool
+    decision: StrategyDecision
     diagnostics: RunnerDiagnostics
 
 
 @dataclass(slots=True)
-class StrategyRunner[TInstrument: SessionInstrument]:
-    strategy: Strategy[TInstrument]
+class StrategyRunner:
+    strategy: Strategy
     sizer: PositionSizer
-    risk_manager: RiskManager
+    settings: RunnerSettings
+    _cached_decision: StrategyDecision | None = None
+    _cached_schedule_bucket: tuple[int, int, int] | tuple[int, int] | date | None = None
 
     @classmethod
-    def from_config(
+    def from_settings(
         cls,
-        config: QoreConfig,
-        strategy: Strategy[TInstrument],
+        settings: RunnerSettings,
+        strategy: Strategy,
         sizer: PositionSizer,
-    ) -> StrategyRunner[TInstrument]:
-        return cls(
-            strategy=strategy,
-            sizer=sizer,
-            risk_manager=RiskManager.from_config(config),
-        )
+    ) -> StrategyRunner:
+        return cls(strategy=strategy, sizer=sizer, settings=settings)
 
     def step(
         self,
-        factor_lf: pl.LazyFrame,
-        inputs: Mapping[str, object] | None,
-        universe: Universe[TInstrument],
-        date: date,
-        current_weights: dict[str, float],
+        context: StrategyContext,
         nav: pl.Series,
-        calendar: TradingCalendar,
     ) -> TargetPortfolio:
-        signal_lf = self.strategy.generate(
-            StrategyContext(
-                factor_lf=factor_lf,
-                universe=universe,
-                date=date,
-                calendar=calendar,
-                inputs=inputs or {},
+        signal_lf = self.strategy.generate(context)
+        prepared_signal_frame, sized_target_frame = self.sizer.pipe(
+            signal_lf,
+            context.factor_lf,
+            max_single=self.settings.max_single,
+        )
+        decision = self._resolve_decision(context, prepared_signal_frame, nav)
+        selected_signal_frame = pl.DataFrame(
+            prepared_signal_frame.lazy()
+            .join(
+                decision.frame.lazy().select("symbol", "selected"),
+                on="symbol",
+                how="left",
             )
-        ).signals
-        signal_frame = self._signal_frame_for_sizer(signal_lf, factor_lf)
-        target = self.sizer.size(signal_frame)
-        adjusted = self.risk_manager.apply(target, current_weights, nav)
-        risk_triggered = adjusted == {} and target != {}
-        diagnostics = self._diagnostics(signal_frame, target, risk_triggered)
+            .filter(pl.col("selected").fill_null(False))
+            .drop("selected")
+            .collect()
+        )
+        selected_weights_frame = _selected_weights_frame(
+            sized_target_frame,
+            decision.frame,
+        )
+        diagnostics = self._diagnostics(prepared_signal_frame, decision, nav)
         return TargetPortfolio(
-            date=date,
-            weights=adjusted,
-            signals=signal_frame,
-            risk_triggered=risk_triggered,
+            date=context.date,
+            weights_frame=selected_weights_frame,
+            signals=selected_signal_frame,
+            decision=decision,
             diagnostics=diagnostics,
         )
 
-    def _signal_frame_for_sizer(
+    def _resolve_decision(
         self,
-        signals: pl.LazyFrame,
-        factor_lf: pl.LazyFrame,
-    ) -> pl.DataFrame:
-        required_columns = sorted(self.sizer.required_columns)
-        if not required_columns:
-            return pl.DataFrame(signals.collect())
-        extras = factor_lf.select("symbol", *required_columns)
-        return pl.DataFrame(signals.join(extras, on="symbol", how="left").collect())
+        context: StrategyContext,
+        signal_frame: pl.DataFrame,
+        nav: pl.Series,
+    ) -> StrategyDecision:
+        has_external_overlay = context.providers.decision_overlay is not None
+        bucket = _schedule_bucket(self.strategy.signal_freq, context.date)
+        if (
+            not has_external_overlay
+            and self._cached_decision is not None
+            and self._cached_schedule_bucket == bucket
+        ):
+            return self._cached_decision
+        decision = DecisionPipeline(
+            as_of=context.date,
+            selection=context.selection,
+            drawdown_stop=self.settings.drawdown_stop,
+        ).resolve(
+            signal_frame=signal_frame,
+            overlay_frame=context.providers.decision_overlay,
+            nav=nav,
+        )
+        if not has_external_overlay:
+            self._cached_decision = decision
+            self._cached_schedule_bucket = bucket
+        return decision
 
     def _diagnostics(
         self,
         signal_frame: pl.DataFrame,
-        target: dict[str, float],
-        risk_triggered: bool,
+        decision: StrategyDecision,
+        nav: pl.Series,
     ) -> RunnerDiagnostics:
-        stats = signal_frame.select(
-            pl.len().alias("eligible_count"),
-            pl.col("signal")
-            .is_not_null()
-            .and_(pl.col("signal").is_finite())
-            .sum()
-            .alias("signal_count"),
-        ).row(0, named=True)
-        eligible_count = int(stats["eligible_count"])
-        signal_count = int(stats["signal_count"])
-        return RunnerDiagnostics(
-            eligible_count=eligible_count,
-            signal_count=signal_count,
-            selected_count=len(target),
-            risk_blocked=risk_triggered,
+        signal_count = (
+            int(
+                signal_frame.select(
+                    pl.col("signal")
+                    .is_not_null()
+                    .and_(pl.col("signal").is_finite())
+                    .sum()
+                ).item()
+            )
+            if not signal_frame.is_empty() and "signal" in signal_frame.columns
+            else 0
         )
+        selected_count = int(decision.frame.filter(pl.col("selected")).height)
+        non_selected_count = int(decision.frame.height - selected_count)
+        drawdown_blocked = False
+        if len(nav) > 1:
+            peak_value = nav.max()
+            latest_value = nav.tail(1).item()
+            peak = float(peak_value) if isinstance(peak_value, (int, float)) else 0.0
+            latest = (
+                float(latest_value) if isinstance(latest_value, (int, float)) else 0.0
+            )
+            drawdown_blocked = (
+                peak > 0.0 and (peak - latest) / peak >= self.settings.drawdown_stop
+            )
+        return RunnerDiagnostics(
+            candidate_count=int(signal_frame.height),
+            signal_count=signal_count,
+            selected_count=selected_count,
+            non_selected_count=non_selected_count,
+            drawdown_blocked=drawdown_blocked,
+        )
+
+
+def _schedule_bucket(
+    freq: Literal["event", "daily", "weekly", "monthly"],
+    as_of: date,
+) -> tuple[int, int, int] | tuple[int, int] | date:
+    if freq in {"event", "daily"}:
+        return as_of
+    if freq == "weekly":
+        iso_year, iso_week, _ = as_of.isocalendar()
+        return (iso_year, iso_week)
+    return (as_of.year, as_of.month)
+
+
+def _selected_weights_frame(
+    target_frame: pl.DataFrame,
+    decision_frame: pl.DataFrame,
+) -> pl.DataFrame:
+    if target_frame.is_empty() or decision_frame.is_empty():
+        return pl.DataFrame(schema={"symbol": pl.String, "weight": pl.Float64})
+    return pl.DataFrame(
+        target_frame.lazy()
+        .join(
+            decision_frame.lazy().select("symbol", "selected"),
+            on="symbol",
+            how="left",
+        )
+        .filter(pl.col("selected").fill_null(False))
+        .select("symbol", "weight")
+        .collect()
+    )

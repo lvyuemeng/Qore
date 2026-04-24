@@ -10,8 +10,9 @@ from quant_trade.config.logger import debug_null_profile, log
 from quant_trade.transform import GSIZE, RANK
 
 LABEL_PREFIX: Final[str] = "label_"
-HORZION_DAY:Final[int] = 21
-EMBARGO_DAY:Final[int] = 5
+HORZION_DAY: Final[int] = 21
+EMBARGO_DAY: Final[int] = 5
+
 
 @dataclass
 class PurgedTimeSplit:
@@ -273,7 +274,7 @@ class WalkForwardValidation:
 
 
 class LabelBuilder(Protocol):
-    factor:str
+    factor: str
 
     def label(self, df: pl.DataFrame) -> pl.DataFrame: ...
 
@@ -282,13 +283,14 @@ class LabelBuilder(Protocol):
     @property
     def rank_by_name(self) -> str: ...
 
+
 @dataclass
 class Gaussian:
-    by:list[str]
+    by: list[str]
     winsor_limits: tuple[float, float] | None = (0.01, 0.99)
-    alpha:float = 0.5
+    alpha: float = 0.5
 
-    def __call__(self,df:pl.DataFrame,factor:str,alias:str) -> pl.DataFrame:
+    def __call__(self, df: pl.DataFrame, factor: str, alias: str) -> pl.DataFrame:
         if factor not in df.columns:
             raise ValueError(f"Factor '{factor}' not found in DataFrame")
 
@@ -306,11 +308,7 @@ class Gaussian:
 
         u = ((rank - self.alpha) / (n + 1 - 2 * self.alpha)).clip(1e-12, 1 - 1e-12)
 
-        label = (
-            pl.when(n >= 3)
-            .then(u.map_batches(stats.norm.ppf))
-            .alias(alias)
-        )
+        label = pl.when(n >= 3).then(u.map_batches(stats.norm.ppf)).alias(alias)
 
         return df.with_columns(label).filter(pl.col(alias).is_not_null())
 
@@ -340,11 +338,9 @@ class GaussianLabelBuilder:
     def label(self, df: pl.DataFrame) -> pl.DataFrame:
         log.debug(f"preparing df sanity: {debug_null_profile(df)}")
         by = self.by + [self.rank_by] if self.by else [self.rank_by]
-        return Gaussian(
-                by=by,
-                winsor_limits=self.winsor_limits,
-                alpha=self.alpha
-            )(df,self.factor,self.label_name)
+        return Gaussian(by=by, winsor_limits=self.winsor_limits, alpha=self.alpha)(
+            df, self.factor, self.label_name
+        )
 
     @property
     def label_name(self) -> str:
@@ -372,34 +368,28 @@ class DiscreteLabelBuilder:
         log.debug(f"preparing df sanity: {debug_null_profile(df)}")
         by = self.by + [self.rank_by] if self.by else [self.rank_by]
         temp_col = f"_{self.label_name}"
-        df = Gaussian(
-                by=by,
-                winsor_limits=self.winsor_limits,
-                alpha=self.alpha
-            )(df,self.factor,temp_col)
-        return self._discretize(df,temp_col)
+        df = Gaussian(by=by, winsor_limits=self.winsor_limits, alpha=self.alpha)(
+            df, self.factor, temp_col
+        )
+        return self._discretize(df, temp_col)
 
-    def _discretize(self, df: pl.DataFrame,col:str) -> pl.DataFrame:
-        return df.with_columns(
+    def _discretize(self, df: pl.DataFrame, col: str) -> pl.DataFrame:
+        return (
+            df.with_columns(
                 [
-                    pl.col(col)
-                    .rank("average")
-                    .over(self.rank_by)
-                    .alias(RANK),
-
-                    pl.len()
-                    .over(self.rank_by)
-                    .alias(GSIZE),
+                    pl.col(col).rank("average").over(self.rank_by).alias(RANK),
+                    pl.len().over(self.rank_by).alias(GSIZE),
                 ]
-            ).with_columns(
-
-                    (pl.col(RANK) - 1)
-                    .mul(self.num_bins)
-                    .floordiv(pl.col(GSIZE))
-                    .cast(pl.UInt8)
-                    .alias(self.label_name)
-
-            ).drop(RANK,GSIZE)
+            )
+            .with_columns(
+                (pl.col(RANK) - 1)
+                .mul(self.num_bins)
+                .floordiv(pl.col(GSIZE))
+                .cast(pl.UInt8)
+                .alias(self.label_name)
+            )
+            .drop(RANK, GSIZE)
+        )
 
     @property
     def label_name(self) -> str:
@@ -451,4 +441,3 @@ class BinaryLabelBuilder:
     @property
     def rank_by_name(self) -> str:
         return self.rank_by
-

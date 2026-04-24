@@ -22,7 +22,6 @@ package = false
 members = ["crates/*"]
 
 [tool.uv.sources]
-qore-core = { workspace = true }
 qore-data = { workspace = true }
 qore-factor = { workspace = true }
 qore-intelligence = { workspace = true }

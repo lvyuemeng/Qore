@@ -6,9 +6,9 @@ from datetime import UTC, date, datetime
 import numpy as np
 import polars as pl
 import polars.selectors as cs
-from qore_core.config import QoreConfig
 from qore_data.store.duckdb import QoreStore
 
+from qore_intelligence import IntelligenceSettings
 from qore_intelligence.model.artifact import (
     FeatureSchema,
     ModelArtifactManifest,
@@ -36,14 +36,14 @@ class ModelPipeline:
     model: MultiHorizonRanker
 
     @classmethod
-    def from_config(
+    def from_settings(
         cls,
-        config: QoreConfig,
+        settings: IntelligenceSettings | None = None,
         *,
         x_normalizer: XNormalizer | None = None,
         y_transformer: YTransformer | None = None,
     ) -> ModelPipeline:
-        del config
+        del settings
         return cls(
             x_normalizer=x_normalizer or RankScaler(),
             y_transformer=y_transformer or CrossSectionalZScore(),

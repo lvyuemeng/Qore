@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from qore_core.config import QoreConfig
+
+from qore_intelligence import IntelligenceSettings
 
 
 class EventExtraction(BaseModel):
@@ -37,10 +38,10 @@ class LLMExtractor:
         self._budget = _DailyBudget(self.daily_budget)
 
     @classmethod
-    def from_config(cls, config: QoreConfig) -> LLMExtractor:
+    def from_settings(cls, settings: IntelligenceSettings) -> LLMExtractor:
         return cls(
-            model=config.intelligence.news_llm_model,
-            daily_budget=config.intelligence.news_llm_daily_budget,
+            model=settings.news_llm_model,
+            daily_budget=settings.news_llm_daily_budget,
         )
 
     async def extract(self, text: str) -> EventExtraction | None:

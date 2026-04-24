@@ -8,9 +8,8 @@ from typing import Any, Literal, cast
 
 import httpx
 import polars as pl
-from qore_core.config import QoreConfig
-from qore_core.instrument import FundInstrument, StockInstrument
 
+from qore_data import DataSettings
 from qore_data.fetcher.http import (
     AsyncClosable,
     HardenedJsonFetcher,
@@ -23,6 +22,7 @@ from qore_data.fetcher.http import (
     ResponseGuard,
     TelemetryReadable,
 )
+from qore_data.instrument import FundInstrument, StockInstrument
 
 
 class EastMoneyBlockedError(RuntimeError):
@@ -228,29 +228,29 @@ class EastMoneyFetcher:
         self._json_fetcher = json_fetcher
 
     @classmethod
-    def from_config(cls, config: QoreConfig) -> EastMoneyFetcher:
+    def from_settings(cls, settings: DataSettings) -> EastMoneyFetcher:
         policy = RequestPolicy(
-            delay_min=config.data.eastmoney_delay_min,
-            delay_max=config.data.eastmoney_delay_max,
-            max_retries=config.data.eastmoney_max_retries,
-            retry_budget=config.data.eastmoney_retry_budget,
-            retry_backoff_min=config.data.eastmoney_retry_backoff_min,
-            retry_backoff_max=config.data.eastmoney_retry_backoff_max,
+            delay_min=settings.eastmoney_delay_min,
+            delay_max=settings.eastmoney_delay_max,
+            max_retries=settings.eastmoney_max_retries,
+            retry_budget=settings.eastmoney_retry_budget,
+            retry_backoff_min=settings.eastmoney_retry_backoff_min,
+            retry_backoff_max=settings.eastmoney_retry_backoff_max,
         )
         hardening = RequestHardening(
             telemetry=RequestTelemetry(),
             header_profiles=cls._HEADER_PROFILES,
-            cooldown_min=config.data.eastmoney_cooldown_min,
-            cooldown_max=config.data.eastmoney_cooldown_max,
+            cooldown_min=settings.eastmoney_cooldown_min,
+            cooldown_max=settings.eastmoney_cooldown_max,
         )
         client = httpx.AsyncClient(
             http2=True,
             headers={"Referer": "https://finance.eastmoney.com/"},
-            timeout=config.data.eastmoney_timeout,
+            timeout=settings.eastmoney_timeout,
         )
         fetcher = HardenedJsonFetcher(
             client=client,
-            semaphore=asyncio.Semaphore(config.data.eastmoney_concurrency),
+            semaphore=asyncio.Semaphore(settings.eastmoney_concurrency),
             policy=policy,
             hardening=hardening,
             guard=EastMoneyResponseGuard(

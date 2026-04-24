@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
-from qore_core import QoreConfig
+import polars as pl
 
 from examples.stock_ranking_workflow import (
+    WorkflowConfig,
+    WorkflowDataConfig,
+    WorkflowIntelligenceConfig,
     build_stock_category_report,
     main,
     run_stock_ranking_workflow,
@@ -12,31 +16,33 @@ from examples.stock_ranking_workflow import (
 
 
 def test_run_stock_ranking_workflow_returns_backtest_result(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            },
-            "intelligence": {"model_store_root": str(tmp_path / "models")},
-        }
+    config = WorkflowConfig(
+        data=WorkflowDataConfig(
+            db_path=str(tmp_path / "qore.duckdb"),
+            parquet_root=str(tmp_path / "raw"),
+        ),
+        intelligence=WorkflowIntelligenceConfig(
+            model_store_root=str(tmp_path / "models")
+        ),
     )
 
     result = run_stock_ranking_workflow(config)
 
     assert result.nav.height == 1
-    assert list(result.positions[0]) == ["BBB.SZ"]
+    assert result.positions.filter(pl.col("date") == date(2026, 4, 13)).get_column(
+        "symbol"
+    ).to_list() == ["AAA.SH"]
 
 
 def test_build_stock_category_report_returns_industry_summary(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            },
-            "intelligence": {"model_store_root": str(tmp_path / "models")},
-        }
+    config = WorkflowConfig(
+        data=WorkflowDataConfig(
+            db_path=str(tmp_path / "qore.duckdb"),
+            parquet_root=str(tmp_path / "raw"),
+        ),
+        intelligence=WorkflowIntelligenceConfig(
+            model_store_root=str(tmp_path / "models")
+        ),
     )
 
     report = build_stock_category_report(config)
@@ -49,8 +55,8 @@ def test_build_stock_category_report_returns_industry_summary(tmp_path: Path) ->
         "avg_report_count",
         "announcement_count",
     }
-    assert report.height == 2
-    assert report.get_column("announcement_count").to_list() == [1, 2]
+    assert report.height == 3
+    assert sorted(report.get_column("announcement_count").to_list()) == [1, 1, 2]
 
 
 def test_stock_workflow_main_accepts_config_path(tmp_path: Path) -> None:

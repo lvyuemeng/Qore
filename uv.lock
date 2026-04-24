@@ -5,7 +5,6 @@ requires-python = ">=3.13"
 [manifest]
 members = [
     "qore-backtest",
-    "qore-core",
     "qore-data",
     "qore-factor",
     "qore-intelligence",
@@ -2194,35 +2193,26 @@ version = "0.1.0"
 source = { editable = "crates/qore-backtest" }
 dependencies = [
     { name = "polars" },
-    { name = "qore-core" },
     { name = "qore-data" },
     { name = "qore-runner" },
     { name = "quantstats" },
 ]
 
+[package.dev-dependencies]
+viz = [
+    { name = "matplotlib" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "polars", specifier = ">=1.0" },
-    { name = "qore-core", editable = "crates/qore-core" },
     { name = "qore-data", editable = "crates/qore-data" },
     { name = "qore-runner", editable = "crates/qore-runner" },
     { name = "quantstats", specifier = ">=0.0.62" },
 ]
 
-[[package]]
-name = "qore-core"
-version = "0.1.0"
-source = { editable = "crates/qore-core" }
-dependencies = [
-    { name = "pydantic" },
-    { name = "pyyaml" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pydantic", specifier = ">=2.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-]
+[package.metadata.requires-dev]
+viz = [{ name = "matplotlib", specifier = ">=3.9" }]
 
 [[package]]
 name = "qore-data"
@@ -2233,7 +2223,6 @@ dependencies = [
     { name = "httpx", extra = ["http2"] },
     { name = "polars" },
     { name = "pyarrow" },
-    { name = "qore-core" },
     { name = "tenacity" },
 ]
 
@@ -2243,7 +2232,6 @@ requires-dist = [
     { name = "httpx", extras = ["http2"], specifier = ">=0.28" },
     { name = "polars", specifier = ">=1.0" },
     { name = "pyarrow", specifier = ">=17" },
-    { name = "qore-core", editable = "crates/qore-core" },
     { name = "tenacity", specifier = ">=9" },
 ]
 
@@ -2254,7 +2242,6 @@ source = { editable = "crates/qore-factor" }
 dependencies = [
     { name = "numpy" },
     { name = "polars" },
-    { name = "qore-core" },
     { name = "qore-data" },
     { name = "scipy" },
 ]
@@ -2263,7 +2250,6 @@ dependencies = [
 requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "polars", specifier = ">=1.0" },
-    { name = "qore-core", editable = "crates/qore-core" },
     { name = "qore-data", editable = "crates/qore-data" },
     { name = "scipy", specifier = ">=1.13" },
 ]
@@ -2279,7 +2265,6 @@ dependencies = [
     { name = "numpy" },
     { name = "optuna" },
     { name = "polars" },
-    { name = "qore-core" },
     { name = "qore-data" },
     { name = "qore-factor" },
     { name = "qore-runner" },
@@ -2307,7 +2292,6 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "optuna", specifier = ">=4.7" },
     { name = "polars", specifier = ">=1.0" },
-    { name = "qore-core", editable = "crates/qore-core" },
     { name = "qore-data", editable = "crates/qore-data" },
     { name = "qore-factor", editable = "crates/qore-factor" },
     { name = "qore-runner", editable = "crates/qore-runner" },
@@ -2322,7 +2306,7 @@ version = "0.1.0"
 source = { editable = "crates/qore-runner" }
 dependencies = [
     { name = "polars" },
-    { name = "qore-core" },
+    { name = "qore-data" },
 ]
 
 [package.optional-dependencies]
@@ -2334,7 +2318,7 @@ opt = [
 requires-dist = [
     { name = "cvxpy", marker = "extra == 'opt'", specifier = ">=1.4" },
     { name = "polars", specifier = ">=1.0" },
-    { name = "qore-core", editable = "crates/qore-core" },
+    { name = "qore-data", editable = "crates/qore-data" },
 ]
 provides-extras = ["opt"]
 

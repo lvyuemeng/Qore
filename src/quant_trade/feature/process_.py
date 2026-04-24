@@ -5,31 +5,31 @@ import polars as pl
 
 @staticmethod
 def _safe_div(
-	num: str | pl.Expr,
-	den: str | pl.Expr,
-	alias: str,
-	*,
-	min_den: float = 1e-6,
-	handle_neg_den: Literal["null", "abs", "keep"] = "null",
-	fill_null: float | None = None,
+    num: str | pl.Expr,
+    den: str | pl.Expr,
+    alias: str,
+    *,
+    min_den: float = 1e-6,
+    handle_neg_den: Literal["null", "abs", "keep"] = "null",
+    fill_null: float | None = None,
 ) -> pl.Expr:
-	n = pl.col(num) if isinstance(num, str) else num
-	d = pl.col(den) if isinstance(den, str) else den
+    n = pl.col(num) if isinstance(num, str) else num
+    d = pl.col(den) if isinstance(den, str) else den
 
-	neg_mask = d <= 0
+    neg_mask = d <= 0
 
-	d_adj = d.abs() if handle_neg_den == "abs" else d
-	d_safe = d_adj.clip(lower_bound=min_den)
+    d_adj = d.abs() if handle_neg_den == "abs" else d
+    d_safe = d_adj.clip(lower_bound=min_den)
 
-	ratio = n / d_safe
+    ratio = n / d_safe
 
-	if handle_neg_den == "null":
-		ratio = pl.when(neg_mask).then(None).otherwise(ratio)
+    if handle_neg_den == "null":
+        ratio = pl.when(neg_mask).then(None).otherwise(ratio)
 
-	if fill_null is not None:
-		ratio = ratio.fill_null(fill_null)
+    if fill_null is not None:
+        ratio = ratio.fill_null(fill_null)
 
-	return ratio.alias(alias)
+    return ratio.alias(alias)
 
 
 class MetricProvider(Protocol):
@@ -40,7 +40,7 @@ class MetricProvider(Protocol):
 
     def stages(self) -> list[list[pl.Expr]]:
         """
-        Returns a list of stages. 
+        Returns a list of stages.
         Stage 1 can use columns produced by Stage 0.
         """
         ...
@@ -51,7 +51,7 @@ class MetricEngine:
         self,
         providers: list[MetricProvider],
         ident_cols: list[str],
-        mode: Literal["append", "select"] = "append"
+        mode: Literal["append", "select"] = "append",
     ):
         self.providers = providers
         self.ident_cols = ident_cols
@@ -59,7 +59,7 @@ class MetricEngine:
 
     def compute(self, df: pl.DataFrame) -> pl.DataFrame:
         max_stages = max(len(p.stages()) for p in self.providers)
-        result = df.lazy() # Use LazyFrame for better plan optimization
+        result = df.lazy()  # Use LazyFrame for better plan optimization
 
         for stage_idx in range(max_stages):
             current_stage_exprs = []

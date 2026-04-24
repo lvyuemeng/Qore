@@ -4,20 +4,19 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
-from qore_core import QoreConfig
+from qore_data import DataSettings
 from qore_data.store.duckdb import QoreStore
 
 
-def test_store_write_and_read_stock_ohlcv(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            }
-        }
+def _settings(tmp_path: Path) -> DataSettings:
+    return DataSettings(
+        db_path=str(tmp_path / "qore.duckdb"),
+        parquet_root=str(tmp_path / "raw"),
     )
-    store = QoreStore.from_config(config)
+
+
+def test_store_write_and_read_stock_ohlcv(tmp_path: Path) -> None:
+    store = QoreStore.from_settings(_settings(tmp_path))
     df = pl.DataFrame(
         {
             "date": [date(2026, 4, 10)],
@@ -40,30 +39,14 @@ def test_store_write_and_read_stock_ohlcv(tmp_path: Path) -> None:
 
 
 def test_register_all_views_works_without_files(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            }
-        }
-    )
-    store = QoreStore.from_config(config)
+    store = QoreStore.from_settings(_settings(tmp_path))
     store.register_all_views()
     result = pl.DataFrame(store.sql("select * from stock_ohlcv").collect())
     assert result.is_empty()
 
 
 def test_register_all_views_reads_written_dataset(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            }
-        }
-    )
-    store = QoreStore.from_config(config)
+    store = QoreStore.from_settings(_settings(tmp_path))
     df = pl.DataFrame(
         {
             "date": [date(2026, 4, 10)],
@@ -87,15 +70,7 @@ def test_register_all_views_reads_written_dataset(tmp_path: Path) -> None:
 
 
 def test_store_read_semantics_match_between_parquet_and_duckdb(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            }
-        }
-    )
-    store = QoreStore.from_config(config)
+    store = QoreStore.from_settings(_settings(tmp_path))
     df = pl.DataFrame(
         {
             "date": [date(2026, 4, 10), date(2026, 4, 10)],
@@ -133,15 +108,7 @@ def test_store_read_semantics_match_between_parquet_and_duckdb(tmp_path: Path) -
 
 
 def test_store_rejects_missing_columns(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            }
-        }
-    )
-    store = QoreStore.from_config(config)
+    store = QoreStore.from_settings(_settings(tmp_path))
     df = pl.DataFrame({"date": [date(2026, 4, 10)], "symbol": ["600519.SH"]})
     try:
         store.write("stock_ohlcv", df)
@@ -152,15 +119,7 @@ def test_store_rejects_missing_columns(tmp_path: Path) -> None:
 
 
 def test_store_deduplicates_existing_rows_across_writes(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            }
-        }
-    )
-    store = QoreStore.from_config(config)
+    store = QoreStore.from_settings(_settings(tmp_path))
     df = pl.DataFrame(
         {
             "date": [date(2026, 4, 10)],
@@ -185,15 +144,7 @@ def test_store_deduplicates_existing_rows_across_writes(tmp_path: Path) -> None:
 
 
 def test_store_rejects_unknown_filter_columns(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            }
-        }
-    )
-    store = QoreStore.from_config(config)
+    store = QoreStore.from_settings(_settings(tmp_path))
 
     try:
         store.read("stock_ohlcv", filters={"missing": "value"})

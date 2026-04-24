@@ -5,9 +5,9 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
-from qore_core.config import QoreConfig
 from qore_data.store.duckdb import QoreStore
 
+from qore_intelligence import IntelligenceSettings
 from qore_intelligence.model.artifact import TrainedModelArtifact
 from qore_intelligence.model.lgbm_rank import MultiHorizonRanker
 from qore_intelligence.model.normalizer import (
@@ -28,7 +28,7 @@ class TrainingRun:
 
 def fit_and_save_model(
     *,
-    config: QoreConfig,
+    intelligence_settings: IntelligenceSettings,
     model_name: str,
     factor_lf: pl.LazyFrame,
     store: QoreStore,
@@ -47,7 +47,10 @@ def fit_and_save_model(
         store,
         model_name=model_name,
     )
-    artifact_path = ModelRegistry.from_config(config).save(artifact, version)
+    artifact_path = ModelRegistry.from_settings(intelligence_settings).save(
+        artifact,
+        version,
+    )
     return TrainingRun(artifact=artifact, artifact_path=artifact_path)
 
 
@@ -77,7 +80,7 @@ def training_frame_from_store(
 
 def fit_and_save_model_from_store(
     *,
-    config: QoreConfig,
+    intelligence_settings: IntelligenceSettings,
     model_name: str,
     store: QoreStore,
     factor_names: list[str],
@@ -99,7 +102,7 @@ def fit_and_save_model_from_store(
         end=end,
     )
     return fit_and_save_model(
-        config=config,
+        intelligence_settings=intelligence_settings,
         model_name=model_name,
         factor_lf=factor_lf,
         store=store,

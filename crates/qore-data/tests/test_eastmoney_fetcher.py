@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import polars as pl
 import pytest
-from qore_core import FundInstrument, QoreConfig, StockInstrument
+from qore_data import DataSettings, FundInstrument, StockInstrument
 from qore_data.fetch import (
     fetch_analyst_forecast,
     fetch_announcements,
@@ -610,7 +610,7 @@ def test_anti_crawl_detection_handles_status_and_body_markers() -> None:
 
 
 def test_request_headers_include_rotating_profile_and_origin() -> None:
-    fetcher = EastMoneyFetcher.from_config(QoreConfig())
+    fetcher = EastMoneyFetcher.from_settings(DataSettings())
 
     assert isinstance(fetcher._json_fetcher, HardenedJsonFetcher)
 
@@ -624,23 +624,19 @@ def test_request_headers_include_rotating_profile_and_origin() -> None:
     assert headers["Referer"] == "https://quote.eastmoney.com/600519.html"
 
 
-def test_from_config_applies_eastmoney_hardening_settings() -> None:
-    fetcher = EastMoneyFetcher.from_config(
-        QoreConfig.model_validate(
-            {
-                "data": {
-                    "eastmoney_concurrency": 3,
-                    "eastmoney_delay_min": 0.1,
-                    "eastmoney_delay_max": 0.2,
-                    "eastmoney_timeout": 9.0,
-                    "eastmoney_max_retries": 4,
-                    "eastmoney_retry_budget": 11,
-                    "eastmoney_cooldown_min": 2.0,
-                    "eastmoney_cooldown_max": 7.0,
-                    "eastmoney_retry_backoff_min": 0.25,
-                    "eastmoney_retry_backoff_max": 1.25,
-                }
-            }
+def test_from_settings_applies_eastmoney_hardening_settings() -> None:
+    fetcher = EastMoneyFetcher.from_settings(
+        DataSettings(
+            eastmoney_concurrency=3,
+            eastmoney_delay_min=0.1,
+            eastmoney_delay_max=0.2,
+            eastmoney_timeout=9.0,
+            eastmoney_max_retries=4,
+            eastmoney_retry_budget=11,
+            eastmoney_cooldown_min=2.0,
+            eastmoney_cooldown_max=7.0,
+            eastmoney_retry_backoff_min=0.25,
+            eastmoney_retry_backoff_max=1.25,
         )
     )
 

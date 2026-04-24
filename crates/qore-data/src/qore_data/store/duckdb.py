@@ -9,8 +9,8 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pyarrow import types as pa_types
-from qore_core.config import QoreConfig
 
+from qore_data import DataSettings
 from qore_data.store.schema import DATASETS, Dataset
 
 StoreBackend = Literal["auto", "parquet", "duckdb"]
@@ -57,8 +57,8 @@ class QoreStore:
         self.register_all_views()
 
     @classmethod
-    def from_config(cls, config: QoreConfig) -> QoreStore:
-        return cls(db_path=config.data.db_path, parquet_root=config.data.parquet_root)
+    def from_settings(cls, settings: DataSettings) -> QoreStore:
+        return cls(db_path=settings.db_path, parquet_root=settings.parquet_root)
 
     def _dataset(self, dataset: str) -> Dataset:
         if dataset not in DATASETS:

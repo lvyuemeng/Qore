@@ -5,9 +5,9 @@ from datetime import date
 from typing import Literal, Protocol
 
 import polars as pl
-from qore_core.instrument import TradingSession
+from qore_data.universe import TradingSession
 
-from qore_runner.strategy import Strategy, StrategyContext, StrategyResult
+from qore_runner.strategy import Strategy, StrategyContext
 
 
 class RegimeDetector(Protocol):
@@ -34,15 +34,13 @@ class BehavioralGatedStrategy:
     def required_columns(self) -> frozenset[str]:
         return self.base.required_columns | {"realized_vol_20d"}
 
-    def generate(self, context: StrategyContext) -> StrategyResult:
+    def generate(self, context: StrategyContext) -> pl.LazyFrame:
         base_signal = self.base.generate(context)
         regime_scale = self._regime_scale(context.factor_lf, context.date)
         vol_scale = self._vol_scale(context.factor_lf)
         scale = max(self.min_scale, min(1.0, regime_scale * vol_scale))
-        return StrategyResult(
-            base_signal.signals.with_columns(
-                (pl.col("signal") * pl.lit(scale)).alias("signal")
-            )
+        return base_signal.with_columns(
+            (pl.col("signal") * pl.lit(scale)).alias("signal")
         )
 
     def _regime_scale(self, lf: pl.LazyFrame, as_of: date) -> float:

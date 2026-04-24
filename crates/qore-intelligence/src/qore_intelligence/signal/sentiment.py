@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from qore_core.config import QoreConfig
+from qore_intelligence import IntelligenceSettings
 
 
 @dataclass(slots=True)
@@ -10,8 +10,8 @@ class FinBERT:
     model_name: str
 
     @classmethod
-    def from_config(cls, config: QoreConfig) -> FinBERT:
-        return cls(model_name=config.intelligence.news_finbert_model)
+    def from_settings(cls, settings: IntelligenceSettings) -> FinBERT:
+        return cls(model_name=settings.news_finbert_model)
 
     def score(self, text: str) -> float:
         positive_words = ("增长", "盈利", "突破", "增持", "上调")

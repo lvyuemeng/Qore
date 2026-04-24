@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
 import polars as pl
-from qore_core.instrument import TradingSession
+from qore_data.universe import TradingSession
 
 from qore_runner.strategy import (
     StrategyContext,
-    StrategyResult,
     align_signals_to_universe,
     tradeable_universe_frame,
 )
@@ -25,7 +23,7 @@ class ScoreCombiner(Protocol):
     def combine(
         self,
         scores: pl.LazyFrame,
-        overlays: Mapping[str, float],
+        overlay_frame: pl.DataFrame | pl.LazyFrame | None,
     ) -> pl.LazyFrame: ...
 
 
@@ -36,21 +34,35 @@ class WeightedOverlayCombiner:
     def combine(
         self,
         scores: pl.LazyFrame,
-        overlays: Mapping[str, float],
+        overlay_frame: pl.DataFrame | pl.LazyFrame | None,
     ) -> pl.LazyFrame:
-        if self.alpha == 0.0 or not overlays:
+        if self.alpha == 0.0 or overlay_frame is None:
             return scores.select(
                 "symbol", pl.col("signal").cast(pl.Float64, strict=False)
             )
-        overlay_frame = pl.DataFrame(
-            {
-                "symbol": list(overlays),
-                "overlay": list(overlays.values()),
-            },
-            schema={"symbol": pl.String, "overlay": pl.Float64},
+        overlay = (
+            pl.DataFrame(overlay_frame.collect())
+            if isinstance(overlay_frame, pl.LazyFrame)
+            else overlay_frame
+        )
+        if overlay.is_empty() or "symbol" not in overlay.columns:
+            return scores.select(
+                "symbol", pl.col("signal").cast(pl.Float64, strict=False)
+            )
+        value_col = "overlay" if "overlay" in overlay.columns else "score"
+        normalized = pl.DataFrame(
+            overlay.lazy()
+            .with_columns(
+                pl.col("symbol").cast(pl.String, strict=False),
+                pl.col(value_col).cast(pl.Float64, strict=False).alias("overlay"),
+            )
+            .filter(pl.col("symbol").is_not_null())
+            .select("symbol", "overlay")
+            .unique(subset=["symbol"], keep="last")
+            .collect()
         )
         return (
-            scores.join(overlay_frame.lazy(), on="symbol", how="left")
+            scores.join(normalized.lazy(), on="symbol", how="left")
             .with_columns(
                 (
                     (1.0 - self.alpha) * pl.col("signal").cast(pl.Float64, strict=False)
@@ -70,14 +82,12 @@ class RankingStrategy:
         {"auction", "nav", "continuous"}
     )
     signal_freq: Literal["event", "daily", "weekly", "monthly"] = "weekly"
-    overlay_key: str = "signal_overlays"
 
     @property
     def required_columns(self) -> frozenset[str]:
         return self.score_provider.required_columns
 
-    def generate(self, context: StrategyContext) -> StrategyResult:
-        overlays = _signal_overlays(context.inputs, self.overlay_key)
+    def generate(self, context: StrategyContext) -> pl.LazyFrame:
         universe_frame = tradeable_universe_frame(
             context.universe,
             context.date,
@@ -85,25 +95,9 @@ class RankingStrategy:
             self.compatible_sessions,
         )
         scores = self.score_provider.predict_scores(context.factor_lf)
-        combined = self.combiner.combine(scores, overlays) if self.combiner else scores
-        return StrategyResult(align_signals_to_universe(combined, universe_frame))
-
-
-def _signal_overlays(
-    inputs: Mapping[str, object],
-    overlay_key: str,
-) -> Mapping[str, float]:
-    value = inputs.get(overlay_key, inputs.get("score_overlays"))
-    if not isinstance(value, Mapping):
-        return {}
-    overlays: dict[str, float] = {}
-    for key, raw in value.items():
-        if not isinstance(key, str):
-            continue
-        if not isinstance(raw, int | float | str):
-            continue
-        try:
-            overlays[key] = float(raw)
-        except (TypeError, ValueError):
-            continue
-    return overlays
+        combined = (
+            self.combiner.combine(scores, context.providers.signal_overlay)
+            if self.combiner
+            else scores
+        )
+        return align_signals_to_universe(combined, universe_frame)

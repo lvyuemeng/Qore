@@ -3,12 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Literal
+from typing import Literal, cast
 
 import polars as pl
-from qore_core.instrument import StockInstrument
-from qore_core.universe import Universe
 
+from qore_data.instrument import StockInstrument, TradingSession
 from qore_data.source import StockSource
 from qore_data.store.duckdb import QoreStore
 
@@ -23,6 +22,182 @@ SelectionStage = Literal[
     "announcements",
 ]
 type BetweenValue = tuple[object, object] | list[object]
+
+_UNSET = object()
+
+
+@dataclass(frozen=True, slots=True)
+class Universe:
+    """Frame-native universe contract for strategy/ranking hot paths."""
+
+    frame: pl.LazyFrame
+    symbol_col: str = "symbol"
+    tradeable_col: str | None = "is_tradeable"
+    suspended_col: str | None = "is_suspended"
+    session_col: str | None = "session"
+    session_marker: TradingSession | None = None
+
+    @classmethod
+    def from_frame(
+        cls,
+        frame: pl.DataFrame | pl.LazyFrame,
+        *,
+        symbol_col: str = "symbol",
+        tradeable_col: str | None = "is_tradeable",
+        suspended_col: str | None = "is_suspended",
+        session_col: str | None = "session",
+        session_marker: TradingSession | None = None,
+    ) -> Universe:
+        lf = frame.lazy() if isinstance(frame, pl.DataFrame) else frame
+        return cls(
+            frame=lf,
+            symbol_col=symbol_col,
+            tradeable_col=tradeable_col,
+            suspended_col=suspended_col,
+            session_col=session_col,
+            session_marker=session_marker,
+        )
+
+    def collect(self) -> pl.DataFrame:
+        return pl.DataFrame(self.frame.collect())
+
+    def symbols(self) -> list[str]:
+        schema = self.frame.collect_schema()
+        if self.symbol_col not in schema:
+            return []
+        return (
+            self.frame.with_row_index("_order")
+            .select(
+                pl.col("_order"),
+                pl.col(self.symbol_col).cast(pl.String).alias("symbol"),
+            )
+            .filter(pl.col("symbol").is_not_null())
+            .group_by("symbol")
+            .agg(pl.col("_order").min().alias("_order"))
+            .sort("_order")
+            .collect()
+            .get_column("symbol")
+            .to_list()
+        )
+
+    def with_session_marker(self, session: TradingSession | None) -> Universe:
+        return Universe(
+            frame=self.frame,
+            symbol_col=self.symbol_col,
+            tradeable_col=self.tradeable_col,
+            suspended_col=self.suspended_col,
+            session_col=self.session_col,
+            session_marker=session,
+        )
+
+    def with_columns(
+        self,
+        *,
+        symbol_col: str | object = _UNSET,
+        tradeable_col: str | None | object = _UNSET,
+        suspended_col: str | None | object = _UNSET,
+        session_col: str | None | object = _UNSET,
+    ) -> Universe:
+        return Universe(
+            frame=self.frame,
+            symbol_col=self.symbol_col if symbol_col is _UNSET else str(symbol_col),
+            tradeable_col=(
+                self.tradeable_col
+                if tradeable_col is _UNSET
+                else cast(str | None, tradeable_col)
+            ),
+            suspended_col=(
+                self.suspended_col
+                if suspended_col is _UNSET
+                else cast(str | None, suspended_col)
+            ),
+            session_col=(
+                self.session_col
+                if session_col is _UNSET
+                else cast(str | None, session_col)
+            ),
+            session_marker=self.session_marker,
+        )
+
+    def records(self) -> list[dict[str, object]]:
+        frame = self.collect()
+        rows = frame.iter_rows(named=True)
+        return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+    def execution_metadata(self) -> pl.DataFrame:
+        collected = self.collect()
+        if collected.is_empty() or self.symbol_col not in collected.columns:
+            return pl.DataFrame(
+                schema={
+                    "symbol": pl.String,
+                    "session": pl.String,
+                    "dataset": pl.String,
+                    "buy_delay": pl.Int64,
+                    "sell_delay": pl.Int64,
+                }
+            )
+        allowed_sessions = ["auction", "continuous", "nav"]
+        default_session = (
+            self.session_marker
+            if self.session_marker in {"auction", "continuous", "nav"}
+            else "auction"
+        )
+        subscription_delay_expr: pl.Expr = pl.lit(None, dtype=pl.Int64)
+        if "subscription_delay" in collected.columns:
+            subscription_delay_expr = pl.col("subscription_delay").cast(
+                pl.Int64, strict=False
+            )
+        redemption_delay_expr: pl.Expr = pl.lit(None, dtype=pl.Int64)
+        if "redemption_delay" in collected.columns:
+            redemption_delay_expr = pl.col("redemption_delay").cast(
+                pl.Int64, strict=False
+            )
+        if self.session_col is not None and self.session_col in collected.columns:
+            session_expr = (
+                pl.when(
+                    pl.col(self.session_col)
+                    .cast(pl.String, strict=False)
+                    .is_in(allowed_sessions)
+                )
+                .then(pl.col(self.session_col).cast(pl.String, strict=False))
+                .otherwise(pl.lit(default_session))
+                .alias("session")
+            )
+        else:
+            session_expr = pl.lit(default_session).alias("session")
+        return pl.DataFrame(
+            collected.lazy()
+            .select(
+                pl.col(self.symbol_col).cast(pl.String, strict=False).alias("symbol"),
+                session_expr,
+                subscription_delay_expr.alias("subscription_delay"),
+                redemption_delay_expr.alias("redemption_delay"),
+            )
+            .filter(pl.col("symbol").is_not_null())
+            .with_columns(
+                pl.when(pl.col("session") == "nav")
+                .then(pl.lit("fund_nav"))
+                .otherwise(pl.lit("stock_ohlcv"))
+                .alias("dataset"),
+                pl.when(pl.col("session") == "continuous")
+                .then(pl.lit(0))
+                .when(pl.col("session") == "nav")
+                .then(pl.col("subscription_delay").fill_null(1))
+                .otherwise(pl.lit(1))
+                .alias("buy_delay"),
+                pl.when(pl.col("session") == "continuous")
+                .then(pl.lit(0))
+                .when(pl.col("session") == "auction")
+                .then(pl.lit(1))
+                .when(pl.col("session") == "nav")
+                .then(pl.col("redemption_delay").fill_null(2))
+                .otherwise(pl.lit(2))
+                .alias("sell_delay"),
+            )
+            .select("symbol", "session", "dataset", "buy_delay", "sell_delay")
+            .unique(subset=["symbol"], keep="last")
+            .collect()
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +264,7 @@ class StockCandidateSpec:
             required.add(_selection_stage_for_field(column))
         return tuple(stage for stage in _SELECTION_STAGE_ORDER if stage in required)
 
-    def apply_lazy(self, selection_frame: pl.LazyFrame) -> pl.LazyFrame:
+    def apply(self, selection_frame: pl.LazyFrame) -> pl.LazyFrame:
         lf = selection_frame.filter(pl.col("is_tradeable").fill_null(False))
         if self.exclude_st:
             lf = lf.filter(~pl.col("is_st").fill_null(False))
@@ -115,36 +290,32 @@ class StockCandidateSpec:
             lf = lf.head(self.top_n)
         return lf
 
-    def apply(self, selection_frame: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:
+    def apply_universe_frame(
+        self,
+        selection_frame: pl.DataFrame | pl.LazyFrame,
+    ) -> pl.DataFrame:
+        """Returns a frame-native candidate universe for hot paths.
+
+        This avoids instrument object reconstruction and is the preferred path for
+        selection/ranking workflows in qore-runner.
+        """
         lf = (
             selection_frame.lazy()
             if isinstance(selection_frame, pl.DataFrame)
             else selection_frame
         )
-        return pl.DataFrame(self.apply_lazy(lf).collect())
-
-    def to_universe(
-        self,
-        selection_frame: pl.DataFrame,
-        *,
-        as_of: date,
-        keep_suspended: bool = False,
-    ) -> Universe[StockInstrument]:
-        selected = self.apply(selection_frame)
-        universe = Universe(
-            [
-                StockInstrument.from_mapping(row)
-                for row in selected.iter_rows(named=True)
-            ]
+        selected = self.apply(lf)
+        schema = selected.collect_schema()
+        columns = ["symbol"]
+        if "is_suspended" in schema:
+            columns.append("is_suspended")
+        return pl.DataFrame(
+            selected.select(*columns)
+            .with_columns(pl.col("symbol").cast(pl.String, strict=False))
+            .filter(pl.col("symbol").is_not_null())
+            .unique(subset=["symbol"], keep="last")
+            .collect()
         )
-        if keep_suspended and "is_suspended" in selected.columns:
-            for symbol in (
-                selected.filter(pl.col("is_suspended").fill_null(False))
-                .get_column("symbol")
-                .to_list()
-            ):
-                universe.set_suspended(str(symbol), as_of)
-        return universe
 
     def _fields_in_use(self) -> set[str]:
         fields = {candidate_filter.field for candidate_filter in self.filters}
@@ -160,6 +331,31 @@ class StockSelectionScope:
     as_of: date
     announcement_start: date | None = None
     announcement_end: date | None = None
+    fundamentals_start: date | None = None
+    fundamentals_end: date | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StockUniverseQuery:
+    pipeline: StockSelectionPipeline
+    candidate_spec: StockCandidateSpec
+
+    def frame(self) -> pl.LazyFrame:
+        staged = self.pipeline.with_candidate_inputs(self.candidate_spec)
+        return self.candidate_spec.apply(staged.frame)
+
+    def universe_frame(self) -> pl.DataFrame:
+        return self.candidate_spec.apply_universe_frame(
+            self.pipeline.with_candidate_inputs(self.candidate_spec).frame,
+        )
+
+    def universe(self) -> Universe:
+        return Universe.from_frame(
+            self.universe_frame(),
+            symbol_col="symbol",
+            suspended_col="is_suspended",
+            session_marker="auction",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,12 +374,16 @@ class StockSelectionPipeline:
         as_of: date,
         announcement_start: date | None = None,
         announcement_end: date | None = None,
+        fundamentals_start: date | None = None,
+        fundamentals_end: date | None = None,
     ) -> StockSelectionPipeline:
         scope = StockSelectionScope(
             index_symbol=index_symbol,
             as_of=as_of,
             announcement_start=announcement_start,
             announcement_end=announcement_end,
+            fundamentals_start=fundamentals_start,
+            fundamentals_end=fundamentals_end,
         )
         frame = store.read_duckdb(
             "index_constituents",
@@ -223,21 +423,18 @@ class StockSelectionPipeline:
         return self.with_stages("profiles", "forecasts", "announcements")
 
     def candidates(self, candidate_spec: StockCandidateSpec) -> pl.DataFrame:
-        return candidate_spec.apply(
-            self.with_candidate_inputs(candidate_spec).frame,
-        )
+        return pl.DataFrame(self.query(candidate_spec).frame().collect())
 
-    def to_universe(
-        self,
-        candidate_spec: StockCandidateSpec,
-        *,
-        keep_suspended: bool = False,
-    ) -> Universe[StockInstrument]:
-        return candidate_spec.to_universe(
-            self.with_candidate_inputs(candidate_spec).collect(),
-            as_of=self.scope.as_of,
-            keep_suspended=keep_suspended,
-        )
+    def universe_frame(self, candidate_spec: StockCandidateSpec) -> pl.DataFrame:
+        """Frame-native universe output; avoids instrument rebuild for selection flows."""
+        return self.query(candidate_spec).universe_frame()
+
+    def universe(self, candidate_spec: StockCandidateSpec | None = None) -> Universe:
+        resolved_spec = candidate_spec or StockCandidateSpec()
+        return self.query(resolved_spec).universe()
+
+    def query(self, candidate_spec: StockCandidateSpec) -> StockUniverseQuery:
+        return StockUniverseQuery(pipeline=self, candidate_spec=candidate_spec)
 
     def category_report(self) -> pl.DataFrame:
         return pl.DataFrame(
@@ -315,7 +512,12 @@ class StockSelectionPipeline:
             return self
         return self._replace(
             frame=self.frame.join(
-                _latest_fundamentals_lazy(self.store, as_of=self.scope.as_of),
+                _fundamentals_window(
+                    self.store,
+                    as_of=self.scope.as_of,
+                    start=self.scope.fundamentals_start,
+                    end=self.scope.fundamentals_end,
+                ),
                 on="symbol",
                 how="left",
             ),
@@ -356,7 +558,7 @@ class StockSelectionPipeline:
         if "announcements" in self.stages:
             return self
         frame = self.frame.join(
-            _announcement_counts_lazy(
+            _announcement_counts(
                 self.store,
                 start=self.scope.announcement_start,
                 end=self.scope.announcement_end,
@@ -372,7 +574,7 @@ class StockSelectionPipeline:
         adverse_codes: tuple[str, ...] = ("disclaimer", "adverse"),
         max_age_days: int | None = None,
     ) -> StockSelectionPipeline:
-        state = _latest_audit_opinion_state_lazy(
+        state = _latest_audit_opinion_state(
             self.store,
             as_of=self.scope.as_of,
             adverse_codes=adverse_codes,
@@ -404,6 +606,13 @@ class StockSelectionPipeline:
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotQuery:
+    as_of: date | None = None
+    start: date | None = None
+    end: date | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class StockSnapshotSpec:
     dataset: Literal[
         "stock_profiles",
@@ -419,31 +628,37 @@ class StockSnapshotSpec:
         source: StockSource,
         instruments: Sequence[StockInstrument],
         *,
-        as_of: date | None = None,
-        start: date | None = None,
-        end: date | None = None,
+        query: SnapshotQuery,
     ) -> list[pl.DataFrame]:
         if self.kind == "profile":
-            if as_of is None:
+            if query.as_of is None:
                 msg = "Profile snapshot requires as_of."
                 raise ValueError(msg)
-            return [await source.stock_profile(inst, as_of) for inst in instruments]
+            return [
+                await source.stock_profile(inst, query.as_of) for inst in instruments
+            ]
         if self.kind == "forecast":
-            if as_of is None:
+            if query.as_of is None:
                 msg = "Forecast snapshot requires as_of."
                 raise ValueError(msg)
-            return [await source.analyst_forecast(inst, as_of) for inst in instruments]
+            return [
+                await source.analyst_forecast(inst, query.as_of) for inst in instruments
+            ]
         if self.kind == "audit_opinion":
-            if start is None or end is None:
+            if query.start is None or query.end is None:
                 msg = "Audit opinion snapshot requires start and end."
                 raise ValueError(msg)
             return [
-                await source.audit_opinions(inst, start, end) for inst in instruments
+                await source.audit_opinions(inst, query.start, query.end)
+                for inst in instruments
             ]
-        if start is None or end is None:
+        if query.start is None or query.end is None:
             msg = "Announcement snapshot requires start and end."
             raise ValueError(msg)
-        return [await source.announcements(inst, start, end) for inst in instruments]
+        return [
+            await source.announcements(inst, query.start, query.end)
+            for inst in instruments
+        ]
 
     async def snapshot(
         self,
@@ -451,16 +666,12 @@ class StockSnapshotSpec:
         store: QoreStore,
         *,
         instruments: Sequence[StockInstrument],
-        as_of: date | None = None,
-        start: date | None = None,
-        end: date | None = None,
+        query: SnapshotQuery,
     ) -> pl.DataFrame:
         frames = await self.fetch_frames(
             source,
             instruments,
-            as_of=as_of,
-            start=start,
-            end=end,
+            query=query,
         )
         non_empty = [frame for frame in frames if not frame.is_empty()]
         if not non_empty:
@@ -651,6 +862,29 @@ _SELECTION_STAGE_BY_FIELD: dict[str, SelectionStage] = {
     "announcement_count": "announcements",
 }
 
+_SNAPSHOT_SPECS: dict[StockSnapshotKind, StockSnapshotSpec] = {
+    "profile": StockSnapshotSpec(
+        dataset="stock_profiles",
+        kind="profile",
+        schema=_STOCK_PROFILES_SCHEMA,
+    ),
+    "forecast": StockSnapshotSpec(
+        dataset="analyst_forecasts",
+        kind="forecast",
+        schema=_ANALYST_FORECASTS_SCHEMA,
+    ),
+    "announcement": StockSnapshotSpec(
+        dataset="announcements",
+        kind="announcement",
+        schema=_ANNOUNCEMENTS_SCHEMA,
+    ),
+    "audit_opinion": StockSnapshotSpec(
+        dataset="stock_audit_opinions",
+        kind="audit_opinion",
+        schema=_AUDIT_OPINIONS_SCHEMA,
+    ),
+}
+
 
 def _selection_stage_for_field(field: str) -> SelectionStage:
     if field in {
@@ -665,6 +899,22 @@ def _selection_stage_for_field(field: str) -> SelectionStage:
         msg = f"Unsupported stock selection field: {field}"
         raise KeyError(msg)
     return _SELECTION_STAGE_BY_FIELD[field]
+
+
+async def _snapshot_stock_dataset(
+    kind: StockSnapshotKind,
+    source: StockSource,
+    store: QoreStore,
+    *,
+    instruments: Sequence[StockInstrument],
+    query: SnapshotQuery,
+) -> pl.DataFrame:
+    return await _SNAPSHOT_SPECS[kind].snapshot(
+        source,
+        store,
+        instruments=instruments,
+        query=query,
+    )
 
 
 async def snapshot_index_constituents(
@@ -689,15 +939,12 @@ async def snapshot_stock_profiles(
     instruments: Sequence[StockInstrument],
     as_of: date,
 ) -> pl.DataFrame:
-    return await StockSnapshotSpec(
-        dataset="stock_profiles",
-        kind="profile",
-        schema=_STOCK_PROFILES_SCHEMA,
-    ).snapshot(
+    return await _snapshot_stock_dataset(
+        "profile",
         source,
         store,
         instruments=instruments,
-        as_of=as_of,
+        query=SnapshotQuery(as_of=as_of),
     )
 
 
@@ -708,15 +955,12 @@ async def snapshot_stock_analyst_forecasts(
     instruments: Sequence[StockInstrument],
     as_of: date,
 ) -> pl.DataFrame:
-    return await StockSnapshotSpec(
-        dataset="analyst_forecasts",
-        kind="forecast",
-        schema=_ANALYST_FORECASTS_SCHEMA,
-    ).snapshot(
+    return await _snapshot_stock_dataset(
+        "forecast",
         source,
         store,
         instruments=instruments,
-        as_of=as_of,
+        query=SnapshotQuery(as_of=as_of),
     )
 
 
@@ -728,16 +972,12 @@ async def snapshot_stock_announcements(
     start: date,
     end: date,
 ) -> pl.DataFrame:
-    return await StockSnapshotSpec(
-        dataset="announcements",
-        kind="announcement",
-        schema=_ANNOUNCEMENTS_SCHEMA,
-    ).snapshot(
+    return await _snapshot_stock_dataset(
+        "announcement",
         source,
         store,
         instruments=instruments,
-        start=start,
-        end=end,
+        query=SnapshotQuery(start=start, end=end),
     )
 
 
@@ -749,16 +989,12 @@ async def snapshot_stock_audit_opinions(
     start: date,
     end: date,
 ) -> pl.DataFrame:
-    return await StockSnapshotSpec(
-        dataset="stock_audit_opinions",
-        kind="audit_opinion",
-        schema=_AUDIT_OPINIONS_SCHEMA,
-    ).snapshot(
+    return await _snapshot_stock_dataset(
+        "audit_opinion",
         source,
         store,
         instruments=instruments,
-        start=start,
-        end=end,
+        query=SnapshotQuery(start=start, end=end),
     )
 
 
@@ -768,7 +1004,29 @@ async def build_stock_universe_from_index(
     *,
     index_symbol: str,
     as_of: date,
-) -> Universe[StockInstrument]:
+) -> Universe:
+    frame = await build_stock_universe_frame_from_index(
+        source,
+        store,
+        index_symbol=index_symbol,
+        as_of=as_of,
+    )
+    return Universe.from_frame(
+        frame,
+        symbol_col="symbol",
+        tradeable_col=None,
+        suspended_col=None,
+        session_marker="auction",
+    )
+
+
+async def build_stock_universe_frame_from_index(
+    source: StockSource,
+    store: QoreStore,
+    *,
+    index_symbol: str,
+    as_of: date,
+) -> pl.DataFrame:
     instruments = await source.index_constituents(index_symbol, as_of)
     constituents = _index_constituents_frame(
         instruments, index_symbol=index_symbol, as_of=as_of
@@ -791,9 +1049,7 @@ async def build_stock_universe_from_index(
         .drop("exchange_right", "industry_right")
         .collect()
     )
-    return Universe(
-        [StockInstrument.from_mapping(row) for row in frame.iter_rows(named=True)]
-    )
+    return frame
 
 
 def snapshot_stock_statuses(
@@ -854,26 +1110,31 @@ def _index_constituents_frame(
     return pl.DataFrame(rows)
 
 
-def _latest_fundamentals_lazy(store: QoreStore, *, as_of: date) -> pl.LazyFrame:
+def _fundamentals_window(
+    store: QoreStore,
+    *,
+    as_of: date,
+    start: date | None,
+    end: date | None,
+) -> pl.LazyFrame:
+    fundamentals = store.read_duckdb("fundamentals")
+    if start is not None:
+        fundamentals = fundamentals.filter(pl.col("announce_date") >= start)
+    if end is not None:
+        fundamentals = fundamentals.filter(pl.col("announce_date") <= end)
+    if start is None and end is None:
+        fundamentals = fundamentals.filter(pl.col("announce_date") <= as_of)
     return (
-        store.read_duckdb("fundamentals")
-        .filter(pl.col("announce_date") <= as_of)
-        .sort(
-            ["symbol", "announce_date", "report_date"], descending=[False, True, True]
+        fundamentals.sort(
+            ["symbol", "announce_date", "report_date"],
+            descending=[False, True, True],
         )
         .group_by("symbol")
         .first()
     )
 
 
-def _latest_fundamentals_frame(store: QoreStore, *, as_of: date) -> pl.DataFrame:
-    frame = pl.DataFrame(_latest_fundamentals_lazy(store, as_of=as_of).collect())
-    if frame.is_empty():
-        return pl.DataFrame(schema=_FUNDAMENTAL_SELECTION_SCHEMA)
-    return frame.select(list(_FUNDAMENTAL_SELECTION_SCHEMA))
-
-
-def _announcement_counts_lazy(
+def _announcement_counts(
     store: QoreStore,
     *,
     start: date | None,
@@ -887,23 +1148,7 @@ def _announcement_counts_lazy(
     return announcements.group_by("symbol").agg(pl.len().alias("announcement_count"))
 
 
-def _announcement_counts(
-    store: QoreStore,
-    *,
-    start: date | None,
-    end: date | None,
-) -> pl.DataFrame:
-    frame = pl.DataFrame(
-        _announcement_counts_lazy(store, start=start, end=end).collect()
-    )
-    if frame.is_empty():
-        return pl.DataFrame(
-            schema={"symbol": pl.String, "announcement_count": pl.UInt32}
-        )
-    return frame
-
-
-def _latest_audit_opinion_state_lazy(
+def _latest_audit_opinion_state(
     store: QoreStore,
     *,
     as_of: date,

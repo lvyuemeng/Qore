@@ -5,8 +5,9 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-from qore_core.config import QoreConfig
+from qore_data import DataSettings
 from qore_data.store.duckdb import QoreStore
+from qore_intelligence import IntelligenceSettings
 from qore_intelligence.model.artifact import (
     FeatureSchema,
     ModelArtifactManifest,
@@ -44,11 +45,11 @@ def test_cross_sectional_zscore_normalizes_by_group() -> None:
     assert np.isclose(transformed[2:].mean(), 0.0)
 
 
-def test_model_registry_path_derived_from_config(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {"intelligence": {"model_store_root": str(tmp_path)}}
+def test_model_registry_path_derived_from_settings(tmp_path: Path) -> None:
+    settings = IntelligenceSettings(
+        model_store_root=str(tmp_path),
     )
-    registry = ModelRegistry.from_config(config)
+    registry = ModelRegistry.from_settings(settings)
     artifact = TrainedModelArtifact(
         manifest=ModelArtifactManifest(
             model_name="stock_ranker",
@@ -81,8 +82,7 @@ def test_model_registry_path_derived_from_config(tmp_path: Path) -> None:
 
 
 def test_model_pipeline_predict_score_returns_series() -> None:
-    config = QoreConfig()
-    pipeline = ModelPipeline.from_config(config)
+    pipeline = ModelPipeline.from_settings()
     x = np.array([[1.0, 3.0], [2.0, 4.0]])
     pipeline.x_normalizer.fit(x)
     result = pipeline.predict_score(
@@ -127,13 +127,9 @@ def test_purged_kfold_yields_non_empty_splits() -> None:
 
 
 def test_model_pipeline_fit_returns_artifact(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            },
-        }
+    data_settings = DataSettings(
+        db_path=str(tmp_path / "qore.duckdb"),
+        parquet_root=str(tmp_path / "raw"),
     )
     pipeline = ModelPipeline(
         x_normalizer=RankScaler(),
@@ -194,7 +190,7 @@ def test_model_pipeline_fit_returns_artifact(tmp_path: Path) -> None:
 
     artifact = pipeline.fit(
         factor_lf,
-        QoreStore.from_config(config),
+        QoreStore.from_settings(data_settings),
         model_name="stock_ranker",
     )
 
@@ -205,15 +201,11 @@ def test_model_pipeline_fit_returns_artifact(tmp_path: Path) -> None:
 
 
 def test_training_frame_from_store_pivots_factor_scores(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            }
-        }
+    data_settings = DataSettings(
+        db_path=str(tmp_path / "qore.duckdb"),
+        parquet_root=str(tmp_path / "raw"),
     )
-    store = QoreStore.from_config(config)
+    store = QoreStore.from_settings(data_settings)
     store.write(
         "factor_scores",
         pl.DataFrame(
@@ -257,16 +249,14 @@ def test_training_frame_from_store_pivots_factor_scores(tmp_path: Path) -> None:
 
 
 def test_fit_and_save_model_from_store_returns_saved_artifact(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            },
-            "intelligence": {"model_store_root": str(tmp_path / "models")},
-        }
+    data_settings = DataSettings(
+        db_path=str(tmp_path / "qore.duckdb"),
+        parquet_root=str(tmp_path / "raw"),
     )
-    store = QoreStore.from_config(config)
+    intelligence_settings = IntelligenceSettings(
+        model_store_root=str(tmp_path / "models"),
+    )
+    store = QoreStore.from_settings(data_settings)
     store.write(
         "factor_scores",
         pl.DataFrame(
@@ -290,7 +280,7 @@ def test_fit_and_save_model_from_store_returns_saved_artifact(tmp_path: Path) ->
         ),
     )
     run = fit_and_save_model_from_store(
-        config=config,
+        intelligence_settings=intelligence_settings,
         model_name="stock_ranker",
         store=store,
         factor_names=["factor_a"],

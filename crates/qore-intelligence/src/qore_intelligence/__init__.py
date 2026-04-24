@@ -1,3 +1,18 @@
+# ruff: noqa: E402
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligenceSettings:
+    model_store_root: str = "models"
+    news_llm_daily_budget: int = 50
+    news_llm_model: str = "claude-sonnet-4-20250514"
+    news_finbert_model: str = "IDEA-CCNL/Erlangshen-Roberta-110M-Sentiment"
+    news_score_half_life_days: int = 5
+
+
 from qore_intelligence.combine import SignalCombiner
 from qore_intelligence.model.artifact import (
     FeatureSchema,
@@ -35,6 +50,7 @@ __all__ = [
     "EventExtraction",
     "FeatureSchema",
     "FinBERT",
+    "IntelligenceSettings",
     "LLMExtractor",
     "ModelArtifactManifest",
     "ModelPayload",

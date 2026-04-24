@@ -5,11 +5,15 @@ description = "Backtesting engine for Qore"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "qore-core",
     "qore-data",
     "qore-runner",
     "polars>=1.0",
     "quantstats>=0.0.62",
+]
+
+[dependency-groups]
+viz = [
+    "matplotlib>=3.9",
 ]
 
 [build-system]

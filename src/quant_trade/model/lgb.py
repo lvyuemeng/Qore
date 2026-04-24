@@ -17,7 +17,8 @@ from quant_trade.model.process import (
 from quant_trade.model.store import ModelCard, ModelMeta, ModelStore
 
 LGBModelCard: TypeAlias = ModelCard[lgb.Booster]
-LGBModel:TypeAlias = lgb.Booster
+LGBModel: TypeAlias = lgb.Booster
+
 
 @dataclass
 class ModelResult:
@@ -28,7 +29,14 @@ class ModelResult:
     params: dict[str, Any]
     importance: dict[str, float]
 
-    def pack(self,name:str,*,tags:Sequence[str] = (),version:str = "0.0.1",description:str = "") -> LGBModelCard:
+    def pack(
+        self,
+        name: str,
+        *,
+        tags: Sequence[str] = (),
+        version: str = "0.0.1",
+        description: str = "",
+    ) -> LGBModelCard:
         meta = ModelMeta(
             name,
             feature_names=self.feature_names,
@@ -40,7 +48,7 @@ class ModelResult:
             framework="lightgbm",
             description=description,
         )
-        return ModelCard(self.model,meta)
+        return ModelCard(self.model, meta)
 
     def summary(self, top_k: int = 10) -> str:
         lines = []
@@ -50,9 +58,7 @@ class ModelResult:
         lines.append("")
 
         lines.append("Top features by importance:")
-        imp = (
-            sorted(self.importance.items(), key=lambda x: x[1], reverse=True)
-        )
+        imp = sorted(self.importance.items(), key=lambda x: x[1], reverse=True)
         for name, score in imp[:top_k]:
             lines.append(f"  {name:<25} {score}")
 
@@ -73,9 +79,10 @@ class ModelResult:
 class TuneConfig:
     """
     Common training config - objective/metric agnostic.
-    
+
     Contains: num_boost_round, seed, early_stopping, log_period, default_params.
     """
+
     num_boost_round: int = 500
     early_stopping_rounds: int = 50
     log_period: int = 100
@@ -104,25 +111,26 @@ class TuneConfig:
             "bagging_freq",
             "lambda_l1",
             "lambda_l2",
-            "min_child_samples",]
+            "min_child_samples",
+        ]
 
 
 @dataclass(frozen=True)
 class Processor:
     """
     Metric-specific config with static factory methods.
-    
+
     Usage:
         metric_config = MetricConfig.ranking(
             GaussianLabelBuilder(factor="return_1m"),
             metric="ndcg@10",
         )
-        
+
         metric_config = MetricConfig.regression(
             IdentityLabelBuilder(factor="return_1m"),
             metric="rmse",
         )
-        
+
         metric_config = MetricConfig.binary(
             BinaryLabelBuilder(factor="signal"),
             metric="auc",
@@ -149,12 +157,11 @@ class Processor:
                 # Fallback for aliases or custom metrics
                 return self.metric
 
-
     @staticmethod
     def ranking(
         label_builder: DiscreteLabelBuilder,
         *,
-        metric: Literal["ndcg","map" ] = "ndcg",
+        metric: Literal["ndcg", "map"] = "ndcg",
     ) -> "Processor":
         """Create ranking config - objective='lambdarank' with discrete labels."""
         if metric.startswith("ndcg@"):
@@ -203,11 +210,13 @@ class Processor:
     ) -> dict[str, Any]:
         """Build LGB params dict - metric-specific only."""
         params = dict(optimized_params or {})
-        params.update({
-            "objective": self.objective,
-            "metric": self.metric,
-            "verbosity": -1,
-        })
+        params.update(
+            {
+                "objective": self.objective,
+                "metric": self.metric,
+                "verbosity": -1,
+            }
+        )
 
         if self.ndcg_eval_at is not None:
             params["ndcg_eval_at"] = list(self.ndcg_eval_at)
@@ -220,21 +229,29 @@ class Processor:
             return "maximize"
         return "minimize"
 
-    def prepare(self, df: pl.DataFrame, features:list[str], *,ref: lgb.Dataset | None = None) -> tuple[lgb.Dataset, list[str]]:
+    def prepare(
+        self, df: pl.DataFrame, features: list[str], *, ref: lgb.Dataset | None = None
+    ) -> tuple[lgb.Dataset, list[str]]:
         """Used by Trainer: Drops null labels and builds grouped Dataset."""
         label_builder = self.label_builder
         label_col = label_builder.label_name
         if label_builder.factor not in df.columns:
-            raise ValueError(f"None of the required label {label_builder.factor} found in DataFrame")
+            raise ValueError(
+                f"None of the required label {label_builder.factor} found in DataFrame"
+            )
 
         df = label_builder.label(df)
         avail_feats = [f for f in features if f in df.columns]
         if not avail_feats:
-            raise ValueError(f"None of the required features {features[:3]}... found in DataFrame")
+            raise ValueError(
+                f"None of the required features {features[:3]}... found in DataFrame"
+            )
 
         df = df.filter(pl.col(label_col).is_not_null())
         if len(df) == 0:
-            raise ValueError(f"Training DF is empty after dropping null labels in {label_col}")
+            raise ValueError(
+                f"Training DF is empty after dropping null labels in {label_col}"
+            )
 
         group_col = label_builder.rank_by_name
         df = df.sort(group_col)
@@ -242,16 +259,27 @@ class Processor:
         y = df.select(label_col).to_series().to_numpy()
         groups = (
             df.group_by(group_col, maintain_order=True)
-            .len().select("len").to_series().to_numpy()
+            .len()
+            .select("len")
+            .to_series()
+            .to_numpy()
         )
-        dataset = lgb.Dataset(X, y, group=groups, feature_name=avail_feats, reference=ref, free_raw_data=False)
-        return dataset,avail_feats
+        dataset = lgb.Dataset(
+            X,
+            y,
+            group=groups,
+            feature_name=avail_feats,
+            reference=ref,
+            free_raw_data=False,
+        )
+        return dataset, avail_feats
+
 
 @dataclass
 class Trainer:
     """
     Trainer instantiated by Processor.
-    
+
     Usage:
         metric_config = MetricConfig.ranking(GaussianLabelBuilder(factor="return_1m"))
         processor = Processor(features, metric_config)
@@ -272,21 +300,23 @@ class Trainer:
     ) -> ModelResult:
         """
         Train model - metric_config comes from processor.
-        
+
         Only CommonConfig needed - metric_config already in processor.
         """
         common = common_config
 
         # Build datasets
         processor = self.processor
-        train_ds, features = processor.prepare(train_df,self.features)
-        val_ds,_ = processor.prepare(val_df,self.features)
+        train_ds, features = processor.prepare(train_df, self.features)
+        val_ds, _ = processor.prepare(val_df, self.features)
 
         def objective(trial: optuna.Trial) -> float:
             """Optuna objective."""
             opt_params = {
                 "num_leaves": trial.suggest_int("num_leaves", 20, 100),
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
+                "learning_rate": trial.suggest_float(
+                    "learning_rate", 0.01, 0.1, log=True
+                ),
                 "feature_fraction": trial.suggest_float("feature_fraction", 0.6, 0.95),
                 "bagging_fraction": trial.suggest_float("bagging_fraction", 0.6, 0.95),
                 "bagging_freq": trial.suggest_int("bagging_freq", 1, 10),
@@ -300,8 +330,8 @@ class Trainer:
             model = lgb.train(
                 lgb_params,
                 train_set=train_ds,
-                valid_sets=[train_ds,val_ds],
-                valid_names=["train","valid"],
+                valid_sets=[train_ds, val_ds],
+                valid_names=["train", "valid"],
                 num_boost_round=common.num_boost_round,
                 callbacks=[lgb.early_stopping(common.early_stopping_rounds)],
             )
@@ -340,7 +370,7 @@ class Trainer:
             sorted(
                 zip(features, model.feature_importance().astype(float)),
                 key=lambda x: x[1],
-                reverse=True
+                reverse=True,
             )
         )
 
@@ -360,12 +390,12 @@ class Trainer:
     ) -> ModelResult:
         """
         Train a single model using batches for memory efficiency.
-        
+
         Usage:
             def batch_iter():
                 for train_df, val_df in cv.split(df):
                     yield train_df, val_df
-            
+
             result = trainer.train_batchwise(batch_iter, CommonConfig())
         """
         # Accumulate all training batches
@@ -394,29 +424,37 @@ class Trainer:
 class Predictor:
     """
     Predictor for generating inference from trained LightGBM models.
-    
+
     Usage:
         predictor = Predictor(processor)
         predictions = predictor.predict(model_result, test_df)
-        
+
         # Or with stored model:
         predictor = Predictor.from_stored(processor, store, model_name)
         predictions = predictor.predict_df(test_df)
     """
+
     features: list[str]
     model: lgb.Booster
 
     @classmethod
-    def from_store(cls,name:str,*,store:ModelStore,) -> "Predictor":
+    def from_store(
+        cls,
+        name: str,
+        *,
+        store: ModelStore,
+    ) -> "Predictor":
         card = store.retrieve(name=name)
-        return cls(features=card.meta.feature_names,model=card.model)
+        return cls(features=card.meta.feature_names, model=card.model)
 
-    def _prepare(self, df:pl.DataFrame) -> np.ndarray:
+    def _prepare(self, df: pl.DataFrame) -> np.ndarray:
         X = df.select(self.features).to_numpy()
         return X
 
-    def predict(self,df:pl.DataFrame,score_name:str) -> pl.DataFrame:
+    def predict(self, df: pl.DataFrame, score_name: str) -> pl.DataFrame:
         dataset = self._prepare(df)
-        predict = self.model.predict(dataset.data,num_iteration=self.model.best_iteration)
-        res = df.with_columns(pl.Series(name=score_name,values=predict))
+        predict = self.model.predict(
+            dataset.data, num_iteration=self.model.best_iteration
+        )
+        res = df.with_columns(pl.Series(name=score_name, values=predict))
         return res

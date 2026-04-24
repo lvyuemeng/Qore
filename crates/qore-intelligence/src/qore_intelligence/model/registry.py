@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import joblib
-from qore_core.config import QoreConfig
 
+from qore_intelligence import IntelligenceSettings
 from qore_intelligence.model.artifact import TrainedModelArtifact
 
 
@@ -14,8 +14,8 @@ class ModelRegistry:
     root: Path
 
     @classmethod
-    def from_config(cls, config: QoreConfig) -> ModelRegistry:
-        return cls(root=Path(config.intelligence.model_store_root))
+    def from_settings(cls, settings: IntelligenceSettings) -> ModelRegistry:
+        return cls(root=Path(settings.model_store_root))
 
     def save(self, artifact: TrainedModelArtifact, version: str | None = None) -> Path:
         resolved_version = (

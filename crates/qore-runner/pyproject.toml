@@ -5,7 +5,7 @@ description = "Strategy runner for Qore"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "qore-core",
+    "qore-data",
     "polars>=1.0",
 ]
 

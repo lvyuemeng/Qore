@@ -5,9 +5,10 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from qore_core import QoreConfig
+from qore_data import DataSettings
 from qore_data.store.duckdb import QoreStore
 from qore_intelligence.combine import SignalCombiner
+from qore_intelligence import IntelligenceSettings
 from qore_intelligence.signal.llm import LLMExtractor
 from qore_intelligence.signal.score import NewsArticle, NewsPipeline
 from qore_intelligence.signal.triage import Triage
@@ -33,34 +34,29 @@ async def test_llm_extractor_respects_budget() -> None:
 
 
 def test_news_pipeline_decay_score(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            }
-        }
+    data_settings = DataSettings(
+        db_path=str(tmp_path / "qore.duckdb"),
+        parquet_root=str(tmp_path / "raw"),
     )
-    pipeline = NewsPipeline.from_config(config, QoreStore.from_config(config))
+    pipeline = NewsPipeline.from_settings(
+        IntelligenceSettings(),
+        QoreStore.from_settings(data_settings),
+    )
     assert pipeline.decay_score(1.0, 5) < 1.0
 
 
 @pytest.mark.asyncio
 async def test_news_pipeline_processes_and_persists_articles(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            },
-            "intelligence": {
-                "news_score_half_life_days": 5,
-                "news_llm_daily_budget": 5,
-            },
-        }
+    data_settings = DataSettings(
+        db_path=str(tmp_path / "qore.duckdb"),
+        parquet_root=str(tmp_path / "raw"),
     )
-    store = QoreStore.from_config(config)
-    pipeline = NewsPipeline.from_config(config, store)
+    intelligence_settings = IntelligenceSettings(
+        news_score_half_life_days=5,
+        news_llm_daily_budget=5,
+    )
+    store = QoreStore.from_settings(data_settings)
+    pipeline = NewsPipeline.from_settings(intelligence_settings, store)
 
     result = await pipeline.process_articles(
         trading_date=date(2026, 4, 17),

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from qore_core import QoreConfig
+from qore_data import DataSettings
 from qore_data.store.duckdb import QoreStore
 from qore_factor.event.alert import AlertCondition, AlertRule, build_alert_frame
 from qore_factor.event.audit import (
@@ -400,15 +400,12 @@ def test_pipeline_evaluates_ic_metrics() -> None:
 
 
 def test_pipeline_persists_factor_scores(tmp_path: Path) -> None:
-    config = QoreConfig.model_validate(
-        {
-            "data": {
-                "db_path": str(tmp_path / "qore.duckdb"),
-                "parquet_root": str(tmp_path / "raw"),
-            }
-        }
+    store = QoreStore.from_settings(
+        DataSettings(
+            db_path=str(tmp_path / "qore.duckdb"),
+            parquet_root=str(tmp_path / "raw"),
+        )
     )
-    store = QoreStore.from_config(config)
     lf = pl.DataFrame(
         {
             "date": [date(2026, 1, 1), date(2026, 1, 1)],

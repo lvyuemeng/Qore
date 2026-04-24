@@ -2,18 +2,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from functools import singledispatch
-from typing import Literal
+from typing import Literal, TypedDict
 
 import polars as pl
-from qore_core.calendar import TradingCalendar
-from qore_core.config import BacktestConfig
-from qore_core.instrument import (
-    DerivativeInstrument,
-    FundInstrument,
-    Instrument,
-    StockInstrument,
-)
+from qore_runner.calendar import TradingCalendar
+
+from qore_backtest import BacktestSettings
+
+TradingSession = Literal["auction", "nav", "continuous"]
+
+
+class MarketRow(TypedDict, total=False):
+    open: float | int | None
+    nav: float | int | None
+    is_suspended: bool
+    limit_up: bool
+    limit_down: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,177 +30,217 @@ class Fill:
     reason: str | None = None
 
 
-@singledispatch
 def fill_delay(
-    inst: Instrument,
+    session: TradingSession,
     direction: Literal["buy", "sell"],
+    *,
+    buy_delay: int | None = None,
+    sell_delay: int | None = None,
 ) -> int:
-    del direction
-    raise TypeError(f"No fill-delay logic for {type(inst).__name__}")
-
-
-@fill_delay.register(StockInstrument)
-def _stock_fill_delay(
-    inst: StockInstrument,
-    direction: Literal["buy", "sell"],
-) -> int:
-    del inst, direction
+    if session == "nav":
+        if direction == "buy":
+            return max(0, buy_delay if buy_delay is not None else 1)
+        return max(0, sell_delay if sell_delay is not None else 2)
+    if session == "continuous":
+        return 0
     return 1
 
 
-@fill_delay.register(FundInstrument)
-def _fund_fill_delay(
-    inst: FundInstrument,
-    direction: Literal["buy", "sell"],
-) -> int:
-    return inst.subscription_delay if direction == "buy" else inst.redemption_delay
-
-
-@fill_delay.register(DerivativeInstrument)
-def _derivative_fill_delay(
-    inst: DerivativeInstrument,
-    direction: Literal["buy", "sell"],
-) -> int:
-    del inst, direction
-    return 0
-
-
-@singledispatch
 def expected_fill_date(
-    inst: Instrument,
+    session: TradingSession,
     order_date: date,
     direction: Literal["buy", "sell"],
     calendar: TradingCalendar,
+    *,
+    buy_delay: int | None = None,
+    sell_delay: int | None = None,
 ) -> date:
-    delay = fill_delay(inst, direction)
+    delay = fill_delay(
+        session,
+        direction,
+        buy_delay=buy_delay,
+        sell_delay=sell_delay,
+    )
     if delay == 0:
         return order_date
     return calendar.next_trading_day(order_date, delay)
 
 
-@singledispatch
 def fill_order(
-    inst: Instrument,
+    symbol: str,
+    session: TradingSession,
     order_date: date,
     direction: Literal["buy", "sell"],
     quantity: float,
     price_data: pl.DataFrame,
-    config: BacktestConfig,
+    config: BacktestSettings,
     calendar: TradingCalendar,
+    *,
+    buy_delay: int | None = None,
+    sell_delay: int | None = None,
 ) -> Fill:
-    del order_date, direction, quantity, price_data, config, calendar
-    raise TypeError(f"No fill logic for {type(inst).__name__}")
+    fill_date = expected_fill_date(
+        session,
+        order_date,
+        direction,
+        calendar,
+        buy_delay=buy_delay,
+        sell_delay=sell_delay,
+    )
+    row = _row_for_date(price_data, fill_date)
+    return _fill_from_market_row(
+        symbol,
+        session,
+        fill_date,
+        direction,
+        quantity,
+        row,
+        config,
+    )
 
 
-@fill_order.register(StockInstrument)
+def fill_order_from_market_row(
+    symbol: str,
+    session: TradingSession,
+    order_date: date,
+    direction: Literal["buy", "sell"],
+    quantity: float,
+    market_row: MarketRow | None,
+    config: BacktestSettings,
+    calendar: TradingCalendar,
+    *,
+    buy_delay: int | None = None,
+    sell_delay: int | None = None,
+) -> Fill:
+    fill_date = expected_fill_date(
+        session,
+        order_date,
+        direction,
+        calendar,
+        buy_delay=buy_delay,
+        sell_delay=sell_delay,
+    )
+    return _fill_from_market_row(
+        symbol,
+        session,
+        fill_date,
+        direction,
+        quantity,
+        market_row,
+        config,
+    )
+
+
+def _fill_from_market_row(
+    symbol: str,
+    session: TradingSession,
+    fill_date: date,
+    direction: Literal["buy", "sell"],
+    quantity: float,
+    market_row: MarketRow | None,
+    config: BacktestSettings,
+) -> Fill:
+    if session == "nav":
+        return _fill_nav_order(
+            symbol,
+            fill_date,
+            direction,
+            quantity,
+            market_row,
+            config,
+        )
+    if session == "continuous":
+        return _fill_continuous_order(
+            symbol,
+            fill_date,
+            direction,
+            quantity,
+            market_row,
+            config,
+        )
+    return _fill_stock_order(
+        symbol,
+        fill_date,
+        direction,
+        quantity,
+        market_row,
+        config,
+    )
+
+
 def _fill_stock_order(
-    inst: StockInstrument,
-    order_date: date,
+    symbol: str,
+    fill_date: date,
     direction: Literal["buy", "sell"],
     quantity: float,
-    price_data: pl.DataFrame,
-    config: BacktestConfig,
-    calendar: TradingCalendar,
+    market_row: MarketRow | None,
+    config: BacktestSettings,
 ) -> Fill:
-    fill_date = expected_fill_date(inst, order_date, direction, calendar)
-    row = _row_for_date(price_data, fill_date)
-    if row is None:
-        return Fill(inst.symbol, "rejected", None, None, quantity, "missing price data")
-    if bool(row.get("is_suspended", False)):
-        return Fill(inst.symbol, "rejected", fill_date, None, quantity, "suspended")
-    if direction == "buy" and bool(row.get("limit_up", False)):
-        return Fill(inst.symbol, "pending", fill_date, None, quantity, "limit up")
-    if direction == "sell" and bool(row.get("limit_down", False)):
-        return Fill(inst.symbol, "pending", fill_date, None, quantity, "limit down")
-    open_price = _safe_float(row.get("open"))
+    if market_row is None:
+        return Fill(symbol, "rejected", None, None, quantity, "missing price data")
+    if bool(market_row.get("is_suspended", False)):
+        return Fill(symbol, "rejected", fill_date, None, quantity, "suspended")
+    if direction == "buy" and bool(market_row.get("limit_up", False)):
+        return Fill(symbol, "pending", fill_date, None, quantity, "limit up")
+    if direction == "sell" and bool(market_row.get("limit_down", False)):
+        return Fill(symbol, "pending", fill_date, None, quantity, "limit down")
+    open_value = market_row.get("open")
+    open_price = float(open_value) if isinstance(open_value, (int, float)) else 0.0
     if open_price <= 0.0:
-        return Fill(
-            inst.symbol,
-            "rejected",
-            fill_date,
-            None,
-            quantity,
-            "invalid open price",
-        )
+        return Fill(symbol, "rejected", fill_date, None, quantity, "invalid open price")
     slip = 1.0 + config.slippage if direction == "buy" else 1.0 - config.slippage
-    return Fill(inst.symbol, "filled", fill_date, open_price * slip, quantity)
+    return Fill(symbol, "filled", fill_date, open_price * slip, quantity)
 
 
-@fill_order.register(FundInstrument)
-def _fill_fund_order(
-    inst: FundInstrument,
-    order_date: date,
+def _fill_nav_order(
+    symbol: str,
+    fill_date: date,
     direction: Literal["buy", "sell"],
     quantity: float,
-    price_data: pl.DataFrame,
-    config: BacktestConfig,
-    calendar: TradingCalendar,
+    market_row: MarketRow | None,
+    config: BacktestSettings,
 ) -> Fill:
-    fill_date = expected_fill_date(inst, order_date, direction, calendar)
-    row = _row_for_date(price_data, fill_date)
-    if row is None:
-        return Fill(inst.symbol, "rejected", None, None, quantity, "missing nav data")
-    nav = _safe_float(row.get("nav"))
+    if market_row is None:
+        return Fill(symbol, "rejected", None, None, quantity, "missing nav data")
+    nav_value = market_row.get("nav")
+    nav = float(nav_value) if isinstance(nav_value, (int, float)) else 0.0
     if nav <= 0.0:
-        return Fill(inst.symbol, "rejected", fill_date, None, quantity, "invalid nav")
+        return Fill(symbol, "rejected", fill_date, None, quantity, "invalid nav")
     fee = 1.0 + config.commission if direction == "buy" else 1.0 - config.commission
-    return Fill(inst.symbol, "filled", fill_date, nav * fee, quantity)
+    return Fill(symbol, "filled", fill_date, nav * fee, quantity)
 
 
-@fill_order.register(DerivativeInstrument)
-def _fill_derivative_order(
-    inst: DerivativeInstrument,
-    order_date: date,
+def _fill_continuous_order(
+    symbol: str,
+    fill_date: date,
     direction: Literal["buy", "sell"],
     quantity: float,
-    price_data: pl.DataFrame,
-    config: BacktestConfig,
-    calendar: TradingCalendar,
+    market_row: MarketRow | None,
+    config: BacktestSettings,
 ) -> Fill:
-    fill_date = expected_fill_date(inst, order_date, direction, calendar)
-    row = _row_for_date(price_data, fill_date)
-    if row is None:
-        return Fill(
-            inst.symbol,
-            "rejected",
-            None,
-            None,
-            quantity,
-            "missing derivative data",
-        )
-    open_price = _safe_float(row.get("open"))
+    if market_row is None:
+        return Fill(symbol, "rejected", None, None, quantity, "missing derivative data")
+    open_value = market_row.get("open")
+    open_price = float(open_value) if isinstance(open_value, (int, float)) else 0.0
     if open_price <= 0.0:
-        return Fill(
-            inst.symbol,
-            "rejected",
-            fill_date,
-            None,
-            quantity,
-            "invalid open price",
-        )
+        return Fill(symbol, "rejected", fill_date, None, quantity, "invalid open price")
     slip = 1.0 + config.slippage if direction == "buy" else 1.0 - config.slippage
-    return Fill(inst.symbol, "filled", fill_date, open_price * slip, quantity)
+    return Fill(symbol, "filled", fill_date, open_price * slip, quantity)
 
 
-def _row_for_date(
-    price_data: pl.DataFrame, fill_date: date
-) -> dict[str, object] | None:
+def _row_for_date(price_data: pl.DataFrame, fill_date: date) -> MarketRow | None:
     if price_data.is_empty() or "date" not in price_data.columns:
         return None
     matched = price_data.filter(pl.col("date") == fill_date)
     if matched.is_empty():
         return None
     row = matched.row(0, named=True)
-    return row if isinstance(row, dict) else None
-
-
-def _safe_float(value: object | None) -> float:
-    if isinstance(value, (int, float, str)):
-        try:
-            return float(value)
-        except ValueError:
-            return 0.0
-    try:
-        return float(0.0 if value is None else str(value))
-    except (TypeError, ValueError):
-        return 0.0
+    if not isinstance(row, dict):
+        return None
+    return {
+        "open": row.get("open") if isinstance(row.get("open"), (int, float)) else None,
+        "nav": row.get("nav") if isinstance(row.get("nav"), (int, float)) else None,
+        "is_suspended": bool(row.get("is_suspended", False)),
+        "limit_up": bool(row.get("limit_up", False)),
+        "limit_down": bool(row.get("limit_down", False)),
+    }

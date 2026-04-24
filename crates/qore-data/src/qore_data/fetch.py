@@ -4,13 +4,13 @@ from datetime import date
 from functools import singledispatch
 
 import polars as pl
-from qore_core.instrument import (
+
+from qore_data.instrument import (
     DerivativeInstrument,
     FundInstrument,
     Instrument,
     StockInstrument,
 )
-
 from qore_data.source import DerivativeSource, FundSource, StockSource
 
 

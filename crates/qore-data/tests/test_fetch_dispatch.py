@@ -4,7 +4,7 @@ from datetime import date
 
 import polars as pl
 import pytest
-from qore_core import DerivativeInstrument, FundInstrument, StockInstrument
+from qore_data import DerivativeInstrument, FundInstrument, StockInstrument
 from qore_data.fetch import (
     fetch_audit_opinions,
     fetch_daily,

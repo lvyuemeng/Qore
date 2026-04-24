@@ -4,11 +4,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 import polars as pl
-from qore_core.instrument import TradingSession
+from qore_data.universe import TradingSession
 
 from qore_runner.strategy import (
     StrategyContext,
-    StrategyResult,
     align_signals_to_universe,
     tradeable_universe_frame,
 )
@@ -25,7 +24,7 @@ class CrossSectionalScreener:
     def required_columns(self) -> frozenset[str]:
         return frozenset(self.factor_weights)
 
-    def generate(self, context: StrategyContext) -> StrategyResult:
+    def generate(self, context: StrategyContext) -> pl.LazyFrame:
         universe_frame = tradeable_universe_frame(
             context.universe,
             context.date,
@@ -33,13 +32,9 @@ class CrossSectionalScreener:
             self.compatible_sessions,
         )
         if not self.factor_weights:
-            return StrategyResult(
-                align_signals_to_universe(
-                    pl.DataFrame(
-                        schema={"symbol": pl.String, "signal": pl.Float64}
-                    ).lazy(),
-                    universe_frame,
-                )
+            return align_signals_to_universe(
+                pl.DataFrame(schema={"symbol": pl.String, "signal": pl.Float64}).lazy(),
+                universe_frame,
             )
         scored = context.factor_lf.select(
             "symbol",
@@ -50,4 +45,4 @@ class CrossSectionalScreener:
                 )
             ).alias("signal"),
         )
-        return StrategyResult(align_signals_to_universe(scored, universe_frame))
+        return align_signals_to_universe(scored, universe_frame)
