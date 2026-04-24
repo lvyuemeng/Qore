@@ -1,287 +1,197 @@
 # Qore Rewrite Roadmap
 
-## Goal
+## Objective
 
-Rewrite the repository into the `Qore` architecture in `docs/design.md` and the
-library-first workflow in `docs/workflow.md`.
+Ship a library-first, architecture-clean Qore stack (`qore-*` crates) with:
 
-This remains a staged replacement of legacy `src/quant_trade`, not an
-incremental refactor.
+- typed, frame-native runner/backtest hot paths,
+- crate-local settings (no global config coupling in crate internals),
+- simplified package boundaries before CLI unification,
+- one reproducible A-share workflow from fetch -> factor -> model -> runner -> backtest.
 
-## Ground Rules
+Legacy compatibility is allowed only as thin transitional shims.
 
-1. New architecture first, compatibility second.
-2. New active work lands in `crates/qore-*`, not legacy runtime paths.
-3. Analytical dataflow stays lazy until explicit execution boundaries.
-4. Prefer Polars and backend-native operators before Python loops.
-5. Use `singledispatch` or session-driven dispatch, not union-heavy branching.
-6. Config is runtime infrastructure only; trained state belongs in artifacts.
-7. Example strategy YAML is a reference input for future workflow or CLI layers,
-   not a data-crate-owned runtime surface.
+## Current Direction (Hard Constraints)
 
-## Current State
+1. Architecture-first changes are allowed to be compatibility-breaking.
+2. Keep execution/dataflow Polars-native where practical.
+3. Avoid opaque parsing in crate internals (`_safe_*`, permissive row coercion).
+4. Keep typed semantics in hot paths (dataclasses/typed frame contracts).
+5. Keep settings crate-local and exported at package root.
+6. Keep workflow/CLI layer as the only future config-unification boundary.
 
-- `qore-core`: usable typed config, instrument, calendar, homogeneous universe
-- `qore-data`: usable DuckDB + Parquet store, EastMoney fetcher, staged stock-selection pipeline
-- `qore-factor`: usable lazy factor pipeline and persistence baseline
-- `qore-intelligence`: usable ranking pipeline and cleaner artifact boundary
-- `qore-runner`: usable strategy/sizer/risk flow with generic overlays
-- `qore-backtest`: usable execution/accounting skeleton with metrics baseline
-- workflow reality: library-first composition works, but there is still no supported CLI or one-command operator path
+## Boundary Decisions
 
-## Highest-Priority Missing Features
+### Legacy migration inventory (merged)
 
-These are the highest-priority gaps because they block the reference A-share
-workflow and the example small-cap strategy in `examples/strategy/small_cap_quality_enhanced_monthly.yaml`.
+`docs/migration-inventory.md` is merged into this roadmap and treated as closed reference material.
 
-### From the small-cap strategy example
+- Legacy `src/quant_trade` modules are no longer planning anchors for active architecture work.
+- Current development priority is direct `qore-*` crate evolution, not one-to-one legacy mapping.
+- Practical carry-over policy:
+  - `src/quant_trade/client/eastmoney.py` -> keep endpoint reverse-engineering only; runtime stays in `qore_data.fetcher.eastmoney`.
+  - `src/quant_trade/feature/*` -> carry formulas only when needed by active factor workflow.
+  - `src/quant_trade/model/*` -> carry concepts only; implementation authority stays in `qore_intelligence`.
+  - Non-essential legacy scripts/transforms/config adapters stay retired unless required by the new workflow boundary.
 
-- `debt_to_asset_ratio` belongs in `qore-factor`; the missing piece is raw balance-sheet coverage such as `total_liabilities`, not a data-layer precomputed ratio
-- blocked-trade logic is incomplete; current data does not expose `ask1_volume` / `bid1_volume` or equivalent order-book state
-- audit-opinion exclusion is still incomplete; raw opinion history and reusable event-state composition exist now, but downstream workflow enforcement is not finished
-- single-name capacity checking is still missing; the strategy needs reusable liquidity and capital checks such as target-position-to-amount and minimum traded-value guards
-- `st_warning` and delisting-risk handling are incomplete beyond the current coarse ST/suspension flags
-- alert routing is still missing, but it should be a general workflow alert surface rather than intelligence-specific `ai_record_alert`
-- intraday execution windows are low priority; end-of-day or next-day close-based daily execution is the preferred baseline
-- strategy YAML parsing and operator workflow assembly are missing from the future CLI/workflow layer
+Legacy build order notes are superseded by active workstreams and priority checklists in this document.
 
-### From design and workflow
+### Calendar ownership
 
-- no official CLI or stable user-facing entrypoint contract
-- no single documented daily workflow runnable without manual Python assembly
-- no benchmark-quality end-to-end A-share validation on real historical data
-- no production-grade EastMoney sustained-load proof or mature telemetry reporting
-- no complete operator-facing workflow that goes fetch -> factor -> model -> runner -> backtest from one supported entry
+- `qore_runner.calendar.TradingCalendar`: single runtime calendar owner.
+- `qore_backtest`: consumes runner calendar directly; no crate-local duplicate.
+- `qore_core.calendar`: removed as part of `qore-core` runtime-surface merge-down.
 
-## Milestones
+Policy: retain exactly one calendar module (`qore_runner.calendar`) during this phase.
 
-### Milestone A - Foundation
+### Settings ownership
 
-- Goal: stable workspace, immutable core types, and shared development rules
-- Status: mostly complete
-- Remaining:
-  - keep tightening touched-module typing
-  - keep making `qore-core` APIs more method-owned and consistent
+- `BacktestSettings`, `RunnerSettings`, `DataSettings`, `IntelligenceSettings` now live in each package `__init__.py`.
+- Legacy `settings.py` modules are removed.
+- Internal and user imports should use package-root settings symbols.
 
-### Milestone B - Data to Signal
+## What Is Done
 
-- Goal: produce reliable datasets, factors, and ranking signals
-- Status: active
-- Blocking gaps:
-  - richer A-share metadata and event surfaces
-  - stronger EastMoney hardening and telemetry
-  - more factor coverage only where it supports the target stock workflow
-  - cleaner packaging from stored data to model-ready signals
+- Backtest typed refactor baseline landed:
+  - typed execution structures (`SymbolExecutionSpec`, typed fill/market rows),
+  - reduced dict/list row plumbing in active execution path,
+  - session/dataset routing pre-bound in execution specs,
+  - typed cadence scaffold (`daily`/`intraday`) on `BacktestSettings`.
+- Runner selection/sizing path tightened toward frame-native joins.
+- Runner/backtest efficiency slice landed:
+  - `TargetPortfolio` now carries `weights_frame` as canonical runner output (dict weights removed),
+  - backtest fill-request planning now joins target/current weight frames directly (no per-step dict->frame rebuild),
+  - fill execution no longer materializes typed row dataclass lists before simulation,
+  - execution metadata planning moved to frame-native expression pipeline instead of row-wise Python spec reconstruction.
+- Runner sizing contracts are now frame-native end to end:
+  - `PositionSizer.size` and `PositionSizer.cap` operate on `pl.DataFrame` weights,
+  - `StrategyRunner.step` no longer accepts dict-based current weights.
+- `Universe` ownership migration started:
+  - `Universe` contract is now merged into `qore_data.universe` (no split `universe_contract` module),
+  - `qore-data` package root exports `Universe`, reducing direct runtime dependence on `qore_core.universe`,
+  - runner strategy session typing now imports `TradingSession` from `qore_data.universe` instead of `qore_core.instrument`.
+- `qore-core` universe surface removed:
+  - `qore_core.universe` module deleted,
+  - `Universe` usage is now owned by `qore-data`.
+- `Instrument` ownership migration started:
+  - `qore_data.instrument` now owns `StockInstrument`/`FundInstrument`/`DerivativeInstrument` + `TradingSession`,
+  - `qore-data` fetch/source/eastmoney runtime imports no longer depend on `qore_core.instrument`.
+- `qore-core` dependency edges reduced:
+  - `qore-data`, `qore-factor`, `qore-runner`, `qore-intelligence`, and `qore-backtest` no longer declare `qore-core` package dependency.
+- `qore-core` removal completed in workspace code:
+  - `crates/qore-core` source/tests/package metadata removed,
+  - workspace source mapping for `qore-core` removed.
+- Backtest run-state initialization is now method-owned (`BacktestRunState.initialize(...)`) instead of inline empty-frame construction in the engine loop.
+- Session/dataset restrictions for execution planning are now owned by `Universe.execution_metadata()`; backtest engine consumes precomputed metadata.
+- Backtest run-state moved further toward columnar storage:
+  - day fills are accumulated as frame rows (`fills_frame`) and returned as DataFrame in `BacktestResult`.
+- Universe API cleanup landed:
+  - removed legacy `to_universe` / `to_universe_frame` compatibility methods,
+  - canonical universe output is frame-first (`universe_frame(...)` + explicit `Universe.from_frame(...)` where needed).
+- Snapshot argument model normalized:
+  - `StockSnapshotSpec` now dispatches through a single typed `SnapshotQuery` input.
+- Fundamentals retrieval extended:
+  - selection scope now supports fundamentals date windows (`fundamentals_start`, `fundamentals_end`) and no longer hard-codes latest-only helper wrappers.
+- Universe helper naming and API simplification completed:
+  - removed `*_lazy` helper naming in universe internals,
+  - removed duplicate `candidate_universe_frame(...)` surface and kept canonical `universe_frame(...)`.
+- Backtest execution-plan guardrails + parity coverage landed:
+  - execution planning now rejects symbols with missing/invalid execution session metadata,
+  - daily fill-delay parity tests cover auction/nav/continuous session behavior.
+- Backtest integration consistency coverage improved:
+  - force-exit transition flow now validates cross-artifact consistency (`diagnostics`, `fills`, `turnovers`, `positions`, `nav`) in one compact integration test.
+- Backtest diagnostics/result assembly is now frame-native end-to-end:
+  - removed per-day `BacktestDiagnosticsRow` object materialization in engine assembly,
+  - `BacktestResult` now returns positions/turnover as DataFrames (no dict/list reconstruction).
+- Fill execution row assembly reduced further:
+  - `_fills_from_frame(...)` no longer builds intermediate dict-record frames before final schema assembly,
+  - fill output now materializes directly into final typed DataFrame columns.
+- Crate-local settings migration completed for data/intelligence/runner/backtest package roots.
+- Backtest visualization kickoff landed:
+  - `BacktestResult.view()` + frame-native `BacktestView` landed,
+  - `window(...)`, `with_drawdown(...)`, and `with_benchmark(...)` fluent view methods landed,
+  - `plot()` facade landed with backend managed via uv dependency group (`viz`).
+- Documentation split by audience landed:
+  - `docs/introduction.md` now merges user intro + config + basic workflow usage,
+  - `docs/workflow.md` is contributor-focused with crate-level extension guidance.
+- Universe convenience API improved:
+  - `StockSelectionPipeline.universe(...)` and `StockUniverseQuery.universe()` now return `Universe` directly,
+  - users no longer need to manually wrap `universe_frame(...)` for common flows.
 
-### Milestone C - Portfolio to Backtest
+## Active Workstreams
 
-- Goal: turn signals into portfolios and evaluate them realistically
-- Status: active
-- Blocking gaps:
-  - richer strategy families and operator-facing strategy assembly
-  - better risk behavior and diagnostics
-  - more realistic execution, pending fills, and accounting
-  - support for execution constraints required by the stock example workflow
+### 1) Runner and backtest typed contracts
 
-### Milestone D - Workflow and Cutover
+- Remove residual object-typed row parsing from hot loops.
+- Keep strategy/backtest contracts centered on semantic frames.
+- Add architecture tests for typed contracts and session/dataset consistency.
+- Continue eliminating remaining Python list/set-heavy branching where frame-native joins/aggregations can express the same logic.
 
-- Goal: move from library-first internals to a supported user-facing workflow and retire legacy paths
-- Status: not started
-- Blocking gaps:
-  - CLI or stable entrypoint contract
-  - supported config/workflow assembly layer
-  - cutover proof on real workflows
-  - legacy runtime retirement
+### 2) Config and package-boundary simplification
 
-## Phases
+- Keep crate APIs free of `QoreConfig` requirements.
+- Restrict any `QoreConfig` adapters to workflow/example composition boundaries.
+- Continue shrinking `qore-core` to compatibility-only exports.
+- Move remaining `qore_core` runtime contracts (`instrument`, `universe`) behind crate-local owners and keep only temporary shims.
+- `qore-core` is no longer an active crate; config ownership is moved to workflow-local typed config structures.
 
-### Phase 0 - Freeze and prepare
+### 3) Backtest realism and diagnostics
 
-- Status: done
-- Scope: design target, migration boundary, AI reference rules
-- Remaining: maintenance only
+- Improve pending fill/retry behavior and execution diagnostics.
+- Keep deterministic ordering with optional parallel batch fill boundaries.
 
-### Phase 1 - Workspace bootstrap
+### 4) Optional visualization support
 
-- Status: done
-- Scope: uv workspace, crate layout, shared lint/type/test tooling
-- Remaining: maintenance only
+- API kickoff landed per proposal (`BacktestView` + `BacktestResult.view()` + guarded `plot()` facade).
+- Keep base install dependency-free; keep plotting runtime dependency behind uv dependency group (`viz`).
+- Initial proposal artifact remains at `docs/backtest-visualization-proposal.md`.
 
-### Phase 2 - Core domain rewrite (`qore-core`)
+Proposed pipe-style API (no implementation yet):
 
-- Status: mostly done
-- Done:
-  - typed config
-  - session-aware calendar
-  - homogeneous universe
-  - generic typing improvements on touched APIs
-- Remaining:
-  - keep improving pipe-style universe ergonomics
-  - keep simplifying generic/session-driven dispatch surfaces
+- Add a typed view model container, e.g. `BacktestView`:
+  - `nav: pl.DataFrame`
+  - `drawdown: pl.DataFrame | None`
+  - `benchmarks: dict[str, pl.DataFrame]`
+  - `trades: pl.DataFrame | None`
+  - `diagnostics: pl.DataFrame | None`
+- Expose fluent, method-owned pipeline style from `BacktestResult`:
+  - `result.view().with_drawdown().with_benchmark("CSI300", bench_df).plot().equity()`
+  - `result.view().window(start=..., end=...).plot().overview()`
+- Keep plotting entrypoints behind objects (`.plot().equity()`, `.plot().tearsheet()`), not free helper functions.
+- Keep base install dependency-free; activate plotting via uv dependency group only.
 
-### Phase 3 - Data layer rewrite (`qore-data`)
+## Priority Checklist
 
-- Status: active
-- Done:
-  - EastMoney stock and fund fetch baseline
-  - DuckDB + Parquet store
-  - request hardening helpers
-  - staged stock-selection pipeline owned by `StockSelectionPipeline`
-  - fundamentals schema and EastMoney parsing now cover raw `total_liabilities` for leverage-factor construction
-  - raw `stock_audit_opinions` dataset and EastMoney announcement-derived audit-opinion ingestion baseline
-  - lazy as-of audit-opinion state join on `StockSelectionPipeline`
-- High-priority remaining:
-  - raw balance-sheet coverage needed by factor-layer leverage fields such as `total_liabilities`
-  - richer status/event metadata for ST warning, delisting risk, and audit opinion
-  - order-book or equivalent blocked-trade data for limit-up and limit-down execution filters
-  - reusable daily-liquidity and capital-capacity inputs for per-stock capacity checks
-  - better announcement and event coverage for strategy filters and alerting
-  - clearer store semantics for analytical scans vs filtered retrieval
-  - sustained-load EastMoney validation and usable telemetry
+### P0 - Stability after boundary cleanup
 
-### Phase 4 - Factor engine rewrite (`qore-factor`)
+- [x] Validate no runtime imports still require removed `settings.py` modules.
+- [x] Run lint/compile checks on touched crates.
+- [x] Keep package root exports stable for user imports.
 
-- Status: active
-- Done:
-  - lazy factor pipeline
-  - normalization and evaluation baseline
-  - persistence into `factor_scores`
-  - event-aware audit-opinion factor composition baseline, kept independent of runner/backtest policy
-  - reusable capacity-metric factor composition from daily liquidity inputs
-  - generic alert-condition frame builder from workflow inputs, independent of intelligence subscribers
-- High-priority remaining:
-  - add only workflow-relevant factors and derived fields
-  - support leverage and event-aware factors required by the stock example, including `debt_to_asset_ratio` from raw liabilities and assets
-  - support reusable capacity metrics and penalties derived from daily liquidity inputs, independent of runner policy
-  - improve reconstruction and test coverage
+### P1 - Backtest engine completion
 
-### Phase 5 - Intelligence rewrite (`qore-intelligence`)
+- [x] Finish typed/columnar result assembly paths.
+- [x] Add parity tests for daily cadence before/after planner refinements.
+- [x] Add guardrails against session inference from runtime market rows.
 
-- Status: active
-- Done:
-  - baseline ranking pipeline
-  - artifact manifest/payload/runtime cleanup
-  - news-score persistence baseline
-- High-priority remaining:
-  - lighter metadata inspection separate from payload loading
-  - broader validation and signal-stack maturity
-  - generic workflow alert sinks and event escalation surfaces that intelligence may consume but does not exclusively own
+### P2 - Runner contract simplification
 
-### Phase 6 - Runner rewrite (`qore-runner`)
+- [x] Keep one canonical decision frame (`selected`, `exclude_reason`, timing fields).
+- [x] Reduce remaining helper indirection in decision/sizing flows.
 
-- Status: active
-- Done:
-  - generic strategy boundary
-  - shared sizing path
-  - generic overlay inputs
-  - baseline diagnostics
-- High-priority remaining:
-  - richer stock strategy assembly beyond raw ranking inputs
-  - stronger rule-based exits and exclusion handling once event and capacity overlays are composed upstream
-  - operator-facing strategy config integration at the workflow or CLI layer
+### P3 - Workflow and operator path
 
-### Phase 7 - Backtest rewrite (`qore-backtest`)
+- [x] Document one supported reproducible A-share runbook.
+- [ ] Define CLI/entrypoint contract after crate boundaries stabilize.
 
-- Status: active
-- Done:
-  - session-dispatched fills baseline
-  - cached daily reads
-  - accounting loop and metrics baseline
-- High-priority remaining:
-  - pending-fill and retry realism
-  - execution windows for stock-session workflows after day-level execution support is solid
-  - better diagnostics around blocked trades, retries, and exits
+## Acceptance Gates
 
-### Phase 8 - Workflow and cutover
+The roadmap slice is complete when:
 
-- Status: not started
-- Scope:
-  - supported example entrypoints
-  - config parsing above crate internals
-  - CLI or workflow package boundary
-  - legacy retirement
-- Remaining: all deliverables
-
-## Active Priorities
-
-### Now
-
-- finish the stock data surfaces required by the small-cap monthly strategy
-- finish the factor surfaces required by the small-cap monthly strategy, with derived leverage metrics computed in `qore-factor` instead of stored as raw datasets
-- add workflow-composable capacity checks and generic alert surfaces before deepening runner-specific policy
-- keep the stock-selection API method-owned and remove helper wrappers
-- document the workflow boundary clearly: crates provide primitives, examples show composition, future CLI owns strategy/config parsing
-- validate one reproducible A-share workflow on real historical data
-- harden EastMoney with operational telemetry and sustained-load evidence
-
-## Priority Checklists
-
-### Checklist 1 - `debt_to_asset_ratio`
-
-- `qore-data`: add raw `total_liabilities` coverage to point-in-time fundamentals [done]
-- `qore-factor`: compute `debt_to_asset_ratio = total_liabilities / total_assets`
-- `qore-factor`: keep the ratio lazy and reconstructible from raw fields
-- `qore-runner` or workflow layer: consume the factor as a normal selection input instead of expecting a precomputed store field
-
-### Checklist 2 - audit-opinion exclusion
-
-Concrete implementation plan:
-
-1. `qore-data`
-   - add a persisted `stock_audit_opinions` dataset with at least `symbol`, `report_date`, `announce_date`, `opinion`, `opinion_code`, and source metadata [done]
-   - implement EastMoney endpoint coverage or equivalent announcement-derived parsing for audit opinions [done: announcement-derived baseline]
-   - keep raw opinion history point-in-time, not prefiltered into strategy-specific flags
-2. `qore-data` universe/event surface
-   - add a lazy as-of resolver that derives the latest known adverse opinion state per symbol as of the selection date [done]
-   - expose a reusable event/status join for audit-opinion-driven exclusions without hardcoding one strategy [done: selection-pipeline join baseline]
-3. `qore-factor` / workflow layer
-   - if needed, expose event-aware boolean or age-based features such as `has_adverse_audit_opinion` and `adverse_audit_opinion_age_days` [done: factor composition baseline]
-   - keep these derived fields outside raw dataset storage [done]
-4. workflow layer
-   - compose audit-opinion exclusion windows, capacity checks, and alert conditions before runner/backtest consumption
-   - keep event semantics, alert semantics, and stock-specific thresholds outside runner/backtest core contracts
-5. `qore-runner`
-   - do not own event semantics; only consume already-composed generic overlays when workflow layers choose to provide them
-   - if needed later, support rule-based universe exclusion or forced exit inputs from generic event/status overlays without embedding strategy-specific event details into runner APIs
-6. `qore-backtest`
-   - enforce next-open liquidation and exclusion persistence in execution/accounting flow
-   - add diagnostics so adverse-opinion exits and re-entry blocks are visible in results
-
-### Checklist 3 - stock capacity and general alerts
-
-Concrete implementation plan:
-
-1. `qore-data`
-   - expose reusable daily liquidity inputs such as `amount` history and possibly turnover-derived summaries needed for stock-level capital checks
-   - keep these as generic market-state inputs, not strategy-specific capacity flags
-2. `qore-factor` / workflow layer
-   - derive capacity metrics such as `avg_amount_20d`, `target_position_to_daily_amount`, and capacity penalties from workflow inputs [done: factor composition baseline]
-   - derive general alert condition frames from price/turnover/event inputs without coupling alerts to intelligence consumers [done: generic alert frame baseline]
-3. workflow layer
-   - compose index-universe selection, factor filters, event exclusions, capacity checks, and alert rules into one reusable daily strategy assembly path
-   - define generic alert actions such as `emit_alert` or `record_alert`, leaving downstream subscribers optional
-4. `qore-intelligence`
-   - optionally subscribe to generic alerts for context enrichment, but do not own the alert contract
-5. `qore-runner` / `qore-backtest`
-   - consume capacity-checked universes and generic overlays after workflow composition, without embedding stock-capacity semantics in their core APIs
-
-### Next
-
-- expand only the factor and event surfaces needed by the target workflow
-- strengthen runner risk behavior and backtest realism
-- move workflow/config assembly into a dedicated operator-facing layer
-
-### Later
-
-- decide explicit source expansion scope
-- cut over active workflows fully to supported new entrypoints
-
-## Definition of Done
-
-The rewrite is complete when:
-
-- active workflows run through `qore-*` crates only
-- one supported A-share workflow runs end to end from a stable entrypoint
-- stock example strategy requirements are either implemented or explicitly rejected by the supported workflow contract
-- EastMoney is operationally hardened with evidence, not just local tests
-- legacy `src/quant_trade` is removed or archived out of the active path
+- active crate APIs compose with crate-local settings only,
+- runner/backtest hot paths are typed and frame-native (no opaque row parsing),
+- only one runtime calendar module remains (`qore_runner.calendar`),
+- visualization scope is approved in roadmap before any plotting/runtime dependency changes,
+- `qore-core` is removed from active workspace runtime and dependency graph,
+- one end-to-end A-share workflow remains reproducible on supported entrypoints,
+- crate deliverables remain library-first (no product CLI entrypoint embedded in crates).
