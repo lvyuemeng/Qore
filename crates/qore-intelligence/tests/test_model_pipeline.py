@@ -20,10 +20,6 @@ from qore_intelligence.model.normalizer import CrossSectionalZScore, RankScaler
 from qore_intelligence.model.pipeline import ModelPipeline
 from qore_intelligence.model.registry import ModelRegistry
 from qore_intelligence.model.validation import PurgedKFold, PurgedTimeSplit
-from qore_intelligence.model.workflow import (
-    fit_and_save_model_from_store,
-    training_frame_from_store,
-)
 
 
 def test_rank_scaler_outputs_percentiles() -> None:
@@ -200,55 +196,54 @@ def test_model_pipeline_fit_returns_artifact(tmp_path: Path) -> None:
     assert restored.model.horizons == [1, 2]
 
 
-def test_training_frame_from_store_pivots_factor_scores(tmp_path: Path) -> None:
+def test_wide_store_frame_join_is_training_ready(tmp_path: Path) -> None:
     data_settings = DataSettings(
         db_path=str(tmp_path / "qore.duckdb"),
         parquet_root=str(tmp_path / "raw"),
     )
     store = QoreStore.from_settings(data_settings)
     store.write(
-        "factor_scores",
+        "news_scores",
         pl.DataFrame(
             {
                 "date": [
                     date(2026, 1, 1),
                     date(2026, 1, 1),
-                    date(2026, 1, 1),
-                    date(2026, 1, 1),
                 ],
-                "symbol": ["AAA", "AAA", "BBB", "BBB"],
-                "factor_name": ["factor_a", "factor_b", "factor_a", "factor_b"],
-                "raw_value": [0.1, 0.3, 0.2, 0.4],
-                "z_score": [0.1, 0.3, 0.2, 0.4],
-                "rank_pct": [0.5, 0.8, 0.6, 0.9],
+                "symbol": ["AAA", "BBB"],
+                "score": [0.1, 0.2],
+                "event_type": ["none", "none"],
+                "source_layer": ["unit", "unit"],
             }
         ),
     )
     frame = pl.DataFrame(
-        training_frame_from_store(
-            store=store,
-            factor_names=["factor_a", "factor_b"],
-            forward_returns=pl.DataFrame(
+        store.read("news_scores")
+        .select("date", "symbol", "score")
+        .join(
+            pl.DataFrame(
                 {
                     "date": [date(2026, 1, 1), date(2026, 1, 1)],
                     "symbol": ["AAA", "BBB"],
                     "forward_return_1d": [0.01, 0.02],
                 }
             ).lazy(),
-        ).collect()
+            on=["date", "symbol"],
+            how="inner",
+        )
+        .collect()
     )
 
     assert set(frame.columns) == {
         "date",
         "symbol",
-        "factor_a",
-        "factor_b",
+        "score",
         "forward_return_1d",
     }
     assert frame.height == 2
 
 
-def test_fit_and_save_model_from_store_returns_saved_artifact(tmp_path: Path) -> None:
+def test_model_training_and_registry_save_with_store_frame(tmp_path: Path) -> None:
     data_settings = DataSettings(
         db_path=str(tmp_path / "qore.duckdb"),
         parquet_root=str(tmp_path / "raw"),
@@ -258,7 +253,7 @@ def test_fit_and_save_model_from_store_returns_saved_artifact(tmp_path: Path) ->
     )
     store = QoreStore.from_settings(data_settings)
     store.write(
-        "factor_scores",
+        "news_scores",
         pl.DataFrame(
             {
                 "date": [
@@ -272,42 +267,64 @@ def test_fit_and_save_model_from_store_returns_saved_artifact(tmp_path: Path) ->
                     date(2026, 1, 4),
                 ],
                 "symbol": ["AAA", "BBB"] * 4,
-                "factor_name": ["factor_a"] * 8,
-                "raw_value": [0.1, 0.2, 0.2, 0.1, 0.3, 0.1, 0.4, 0.2],
-                "z_score": [0.1, 0.2, 0.2, 0.1, 0.3, 0.1, 0.4, 0.2],
-                "rank_pct": [0.5, 1.0, 1.0, 0.5, 1.0, 0.5, 1.0, 0.5],
+                "score": [0.1, 0.2, 0.2, 0.1, 0.3, 0.1, 0.4, 0.2],
+                "event_type": ["none"] * 8,
+                "source_layer": ["unit"] * 8,
             }
         ),
     )
-    run = fit_and_save_model_from_store(
-        intelligence_settings=intelligence_settings,
-        model_name="stock_ranker",
-        store=store,
-        factor_names=["factor_a"],
-        forward_returns=pl.DataFrame(
-            {
-                "date": [
-                    date(2026, 1, 1),
-                    date(2026, 1, 1),
-                    date(2026, 1, 2),
-                    date(2026, 1, 2),
-                    date(2026, 1, 3),
-                    date(2026, 1, 3),
-                    date(2026, 1, 4),
-                    date(2026, 1, 4),
-                ],
-                "symbol": ["AAA", "BBB"] * 4,
-                "forward_return_1d": [0.01, 0.02, 0.02, 0.01, 0.03, 0.01, 0.04, 0.02],
-            }
-        ).lazy(),
-        version="store-train",
+    training_lf = (
+        store.read("news_scores")
+        .select("date", "symbol", "score")
+        .join(
+            pl.DataFrame(
+                {
+                    "date": [
+                        date(2026, 1, 1),
+                        date(2026, 1, 1),
+                        date(2026, 1, 2),
+                        date(2026, 1, 2),
+                        date(2026, 1, 3),
+                        date(2026, 1, 3),
+                        date(2026, 1, 4),
+                        date(2026, 1, 4),
+                    ],
+                    "symbol": ["AAA", "BBB"] * 4,
+                    "forward_return_1d": [
+                        0.01,
+                        0.02,
+                        0.02,
+                        0.01,
+                        0.03,
+                        0.01,
+                        0.04,
+                        0.02,
+                    ],
+                }
+            ).lazy(),
+            on=["date", "symbol"],
+            how="inner",
+        )
+    )
+    pipeline = ModelPipeline(
+        x_normalizer=RankScaler(),
+        y_transformer=CrossSectionalZScore(),
         model=MultiHorizonRanker(horizons=[1], weights={"1d": 1.0}),
     )
+    artifact = pipeline.fit(
+        training_lf,
+        store,
+        model_name="stock_ranker",
+    )
+    artifact_path = ModelRegistry.from_settings(intelligence_settings).save(
+        artifact,
+        "store-train",
+    )
 
-    assert run.artifact.manifest.model_name == "stock_ranker"
-    assert run.artifact.manifest.feature_schema.factor_columns == ["factor_a"]
-    assert run.artifact.manifest.ranker_spec.horizons == [1]
+    assert artifact.manifest.model_name == "stock_ranker"
+    assert artifact.manifest.feature_schema.factor_columns == ["score"]
+    assert artifact.manifest.ranker_spec.horizons == [1]
     assert (
-        run.artifact_path
+        artifact_path
         == tmp_path / "models" / "stock_ranker" / "store-train" / "artifact.joblib"
     )
