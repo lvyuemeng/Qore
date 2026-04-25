@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Qore quantitative platform workspace"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "small-cap-strategy",
+]
 
 [dependency-groups]
 dev = [
@@ -19,7 +21,10 @@ dev = [
 package = false
 
 [tool.uv.workspace]
-members = ["crates/*"]
+members = [
+    "crates/*",
+    "examples/small_cap_strategy",
+]
 
 [tool.uv.sources]
 qore-data = { workspace = true }
@@ -27,9 +32,10 @@ qore-factor = { workspace = true }
 qore-intelligence = { workspace = true }
 qore-runner = { workspace = true }
 qore-backtest = { workspace = true }
+small-cap-strategy = { workspace = true }
 
 [tool.pytest.ini_options]
-testpaths = ["crates", "tests"]
+testpaths = ["crates", "tests", "examples/small_cap_strategy/tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"

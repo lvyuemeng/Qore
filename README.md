@@ -38,7 +38,7 @@ uv sync
 Run the reference workflow:
 
 ```bash
-uv run python examples/stock_ranking_workflow.py
+uv run --package small-cap-strategy small-cap-strategy
 ```
 
 ## Legacy Note

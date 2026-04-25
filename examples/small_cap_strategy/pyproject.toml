@@ -1,0 +1,30 @@
+[project]
+name = "small-cap-strategy"
+version = "0.1.0"
+description = "Small-cap real-data strategy workflow entry"
+readme = "README.md"
+authors = [
+    { name = "lvyuemeng", email = "lv15623448685@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.10.7",
+    "polars>=1.33.1",
+    "qore-backtest",
+    "qore-data",
+    "qore-factor",
+    "qore-runner",
+]
+
+[project.scripts]
+small-cap-strategy = "small_cap_strategy.workflow:cli"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+qore-data = { workspace = true }
+qore-runner = { workspace = true }
+qore-backtest = { workspace = true }
+qore-factor = { workspace = true }
