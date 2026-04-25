@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import polars as pl
-from qore_data.store.duckdb import QoreStore
 
 from qore_factor.base import Factor
 
@@ -25,10 +24,10 @@ class FactorPipeline:
     def normalize(
         self,
         method: NormalizeMethod = "zscore",
-        group_by: list[str] | None = None,
+        group_by: list[str] = ["date"],  # noqa: B006
     ) -> FactorPipeline:
         self._normalize_method = method
-        self._normalize_group_by = group_by or ["date"]
+        self._normalize_group_by = list(group_by)
         return self
 
     def neutralize(self, by: list[str]) -> FactorPipeline:
@@ -66,7 +65,7 @@ class FactorPipeline:
         if not factor_columns or not horizons:
             return pl.DataFrame(
                 schema={
-                    "factor_name": pl.String,
+                    "signal_key": pl.String,
                     "horizon": pl.Int64,
                     "ic_mean": pl.Float64,
                     "ic_std": pl.Float64,
@@ -83,7 +82,7 @@ class FactorPipeline:
         )
 
         metric_frames: list[pl.DataFrame] = []
-        for factor_name in factor_columns:
+        for signal_key in factor_columns:
             for horizon in horizons:
                 return_column = f"forward_return_{horizon}d"
                 if return_column not in joined.collect_schema().names():
@@ -93,7 +92,7 @@ class FactorPipeline:
                 daily_ic = pl.DataFrame(
                     joined.select(
                         "date",
-                        pl.col(factor_name).cast(pl.Float64).alias("factor_value"),
+                        pl.col(signal_key).cast(pl.Float64).alias("factor_value"),
                         pl.col(return_column).cast(pl.Float64).alias("forward_return"),
                     )
                     .filter(
@@ -110,7 +109,7 @@ class FactorPipeline:
                     pl.DataFrame(
                         [
                             {
-                                "factor_name": factor_name,
+                                "signal_key": signal_key,
                                 "horizon": horizon,
                                 "ic_mean": _series_stat(daily_ic, "mean"),
                                 "ic_std": _series_stat(daily_ic, "std"),
@@ -122,50 +121,6 @@ class FactorPipeline:
                 )
 
         return pl.concat(metric_frames, how="vertical")
-
-    def to_factor_scores(self, lf: pl.LazyFrame) -> pl.LazyFrame:
-        result = self.run(lf)
-        factor_columns = [factor.produces for factor in self.factors]
-        if not factor_columns:
-            return pl.LazyFrame(
-                schema={
-                    "date": pl.Date,
-                    "symbol": pl.String,
-                    "factor_name": pl.String,
-                    "raw_value": pl.Float64,
-                    "z_score": pl.Float64,
-                    "rank_pct": pl.Float64,
-                }
-            )
-
-        schema_names = set(result.collect_schema().names())
-        frames: list[pl.LazyFrame] = []
-        for column in factor_columns:
-            z_col = f"{column}_z"
-            rank_col = f"{column}_rank_pct"
-            frames.append(
-                result.select(
-                    pl.col("date"),
-                    pl.col("symbol"),
-                    pl.lit(column).alias("factor_name"),
-                    pl.col(column).cast(pl.Float64).alias("raw_value"),
-                    (
-                        pl.col(z_col).cast(pl.Float64)
-                        if z_col in schema_names
-                        else pl.lit(None, dtype=pl.Float64)
-                    ).alias("z_score"),
-                    (
-                        pl.col(rank_col).cast(pl.Float64)
-                        if rank_col in schema_names
-                        else pl.lit(None, dtype=pl.Float64)
-                    ).alias("rank_pct"),
-                )
-            )
-
-        return pl.concat(frames, how="vertical")
-
-    def persist(self, lf: pl.LazyFrame, store: QoreStore) -> None:
-        store.write("factor_scores", self.to_factor_scores(lf))
 
     def _apply_neutralization(
         self,

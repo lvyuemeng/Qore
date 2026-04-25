@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
-from qore_factor.base import OHLCVFactor
+from qore_factor.base import Factor, OHLCVFactor
 
 
 @dataclass(slots=True)
@@ -95,3 +95,17 @@ class CapacityPenaltyFactor(OHLCVFactor):
             .otherwise(self.threshold / (pl.col(self.ratio_column) + 1e-8))
             .alias(self.produces)
         )
+
+
+def liquidity_capacity_factors(
+    *,
+    window: int = 20,
+    position_column: str = "target_position_cny",
+) -> tuple[Factor, Factor, Factor]:
+    avg_factor = AverageAmountFactor(window=window)
+    min_factor = MinimumAmountFactor(window=window)
+    ratio_factor = PositionToLiquidityRatioFactor(
+        liquidity_column=avg_factor.produces,
+        position_column=position_column,
+    )
+    return (avg_factor, min_factor, ratio_factor)

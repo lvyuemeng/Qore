@@ -19,6 +19,7 @@ SelectionStage = Literal[
     "fundamentals",
     "forecasts",
     "daily_market",
+    "liquidity_capacity",
     "announcements",
 ]
 type BetweenValue = tuple[object, object] | list[object]
@@ -402,6 +403,8 @@ class StockSelectionPipeline:
             return self.with_forecasts()
         if stage == "daily_market":
             return self.with_daily_market()
+        if stage == "liquidity_capacity":
+            return self.with_liquidity_capacity()
         return self.with_announcement_counts()
 
     def with_stages(self, *stages: SelectionStage) -> StockSelectionPipeline:
@@ -553,6 +556,52 @@ class StockSelectionPipeline:
             pl.col("limit_down").fill_null(False),
         )
         return self._replace(frame=frame, stage="daily_market")
+
+    def with_liquidity_capacity(
+        self,
+        *,
+        lookback_days: int = 20,
+        value_column: Literal["raw_value", "z_score", "rank_pct"] = "raw_value",
+    ) -> StockSelectionPipeline:
+        if "liquidity_capacity" in self.stages:
+            return self
+        factor_names = (
+            f"avg_amount_{lookback_days}d",
+            f"min_amount_{lookback_days}d",
+            f"position_to_amount_{lookback_days}d_ratio",
+        )
+        factor_lf = (
+            self.store.read_duckdb(
+                "factor_scores",
+                filters={"date": self.scope.as_of},
+            )
+            .filter(pl.col("factor_name").is_in(list(factor_names)))
+            .select(
+                pl.col("symbol").cast(pl.String, strict=False),
+                pl.col("factor_name").cast(pl.String, strict=False),
+                pl.col(value_column)
+                .cast(pl.Float64, strict=False)
+                .alias("factor_value"),
+            )
+        )
+        pivoted = factor_lf.group_by("symbol").agg(
+            pl.col("factor_value")
+            .filter(pl.col("factor_name") == factor_names[0])
+            .last()
+            .alias(factor_names[0]),
+            pl.col("factor_value")
+            .filter(pl.col("factor_name") == factor_names[1])
+            .last()
+            .alias(factor_names[1]),
+            pl.col("factor_value")
+            .filter(pl.col("factor_name") == factor_names[2])
+            .last()
+            .alias(factor_names[2]),
+        )
+        return self._replace(
+            frame=self.frame.join(pivoted, on="symbol", how="left"),
+            stage="liquidity_capacity",
+        )
 
     def with_announcement_counts(self) -> StockSelectionPipeline:
         if "announcements" in self.stages:
@@ -816,6 +865,7 @@ _SELECTION_STAGE_ORDER: tuple[SelectionStage, ...] = (
     "fundamentals",
     "forecasts",
     "daily_market",
+    "liquidity_capacity",
     "announcements",
 )
 
@@ -895,6 +945,12 @@ def _selection_stage_for_field(field: str) -> SelectionStage:
         "industry",
     }:
         return "profiles"
+    if (
+        field.startswith("avg_amount_")
+        or field.startswith("min_amount_")
+        or field.startswith("position_to_amount_")
+    ):
+        return "liquidity_capacity"
     if field not in _SELECTION_STAGE_BY_FIELD:
         msg = f"Unsupported stock selection field: {field}"
         raise KeyError(msg)

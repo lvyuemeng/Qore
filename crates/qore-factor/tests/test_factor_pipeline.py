@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 
 import polars as pl
 import pytest
-from qore_data import DataSettings
-from qore_data.store.duckdb import QoreStore
 from qore_factor.event.alert import AlertCondition, AlertRule, build_alert_frame
 from qore_factor.event.audit import (
     ActiveAuditExclusionFactor,
@@ -31,6 +28,7 @@ from qore_factor.ohlcv.liquidity import (
     CapacityPenaltyFactor,
     MinimumAmountFactor,
     PositionToLiquidityRatioFactor,
+    liquidity_capacity_factors,
 )
 from qore_factor.ohlcv.momentum import MomentumFactor
 from qore_factor.ohlcv.volatility import RealizedVolatilityFactor
@@ -184,6 +182,14 @@ def test_pipeline_adds_liquidity_capacity_factors() -> None:
     assert penalties[3] is None
     assert penalties[4] == pytest.approx(0.5)
     assert penalties[5] == pytest.approx(0.5555555556)
+
+
+def test_liquidity_capacity_factor_factory_names() -> None:
+    factors = liquidity_capacity_factors(
+        window=5, position_column="target_position_cny"
+    )
+    names = [f.produces for f in factors]
+    assert names == ["avg_amount_5d", "min_amount_5d", "position_to_amount_5d_ratio"]
 
 
 def test_pipeline_adds_fundamental_quality_factors() -> None:
@@ -393,38 +399,10 @@ def test_pipeline_evaluates_ic_metrics() -> None:
     )
 
     assert metrics.height == 1
-    assert metrics.get_column("factor_name").to_list() == ["bp"]
+    assert metrics.get_column("signal_key").to_list() == ["bp"]
     assert metrics.get_column("horizon").to_list() == [1]
     assert metrics.get_column("ic_mean").to_list() == [1.0]
     assert metrics.get_column("observations").to_list() == [2]
-
-
-def test_pipeline_persists_factor_scores(tmp_path: Path) -> None:
-    store = QoreStore.from_settings(
-        DataSettings(
-            db_path=str(tmp_path / "qore.duckdb"),
-            parquet_root=str(tmp_path / "raw"),
-        )
-    )
-    lf = pl.DataFrame(
-        {
-            "date": [date(2026, 1, 1), date(2026, 1, 1)],
-            "symbol": ["AAA", "BBB"],
-            "pb": [2.0, 1.0],
-        }
-    ).lazy()
-
-    FactorPipeline().add(BookToPriceFactor()).normalize(method="zscore").persist(
-        lf, store
-    )
-
-    result = _collect_dataframe(store.read("factor_scores")).sort(
-        ["date", "symbol", "factor_name"]
-    )
-    assert result.height == 2
-    assert result.get_column("factor_name").to_list() == ["bp", "bp"]
-    assert result.get_column("raw_value").to_list() == pytest.approx([0.5, 1.0])
-    assert result.get_column("z_score").null_count() == 0
 
 
 def _collect_dataframe(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:

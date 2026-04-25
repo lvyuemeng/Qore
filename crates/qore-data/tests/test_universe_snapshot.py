@@ -929,3 +929,177 @@ def test_stock_candidate_spec_applies_native_polars_filters(
     )
 
     assert candidates.get_column("symbol").to_list() == ["BBB.SZ", "AAA.SH"]
+
+
+def test_stock_selection_pipeline_joins_liquidity_capacity_inputs(
+    tmp_path: Path,
+) -> None:
+    store = QoreStore(str(tmp_path / "qore.duckdb"), str(tmp_path / "raw"))
+    as_of = date(2026, 4, 19)
+    store.write(
+        "index_constituents",
+        pl.DataFrame(
+            {
+                "as_of": [as_of, as_of],
+                "index_symbol": ["8841431.WI", "8841431.WI"],
+                "symbol": ["AAA.SH", "BBB.SZ"],
+                "exchange": ["SH", "SZ"],
+                "industry": ["food", "battery"],
+            }
+        ),
+    )
+    store.write(
+        "factor_scores",
+        pl.DataFrame(
+            {
+                "date": [as_of] * 6,
+                "symbol": [
+                    "AAA.SH",
+                    "AAA.SH",
+                    "AAA.SH",
+                    "BBB.SZ",
+                    "BBB.SZ",
+                    "BBB.SZ",
+                ],
+                "factor_name": [
+                    "avg_amount_20d",
+                    "min_amount_20d",
+                    "position_to_amount_20d_ratio",
+                    "avg_amount_20d",
+                    "min_amount_20d",
+                    "position_to_amount_20d_ratio",
+                ],
+                "raw_value": [
+                    10_000_000.0,
+                    8_000_000.0,
+                    0.08,
+                    4_000_000.0,
+                    3_500_000.0,
+                    0.22,
+                ],
+                "z_score": [0.0] * 6,
+                "rank_pct": [0.5] * 6,
+            }
+        ),
+    )
+
+    frame = (
+        StockSelectionPipeline.from_index(
+            store,
+            index_symbol="8841431.WI",
+            as_of=as_of,
+        )
+        .with_liquidity_capacity(lookback_days=20)
+        .collect()
+        .sort("symbol")
+    )
+
+    rows = {row["symbol"]: row for row in frame.iter_rows(named=True)}
+    assert rows["AAA.SH"]["avg_amount_20d"] == pytest.approx(10_000_000.0)
+    assert rows["AAA.SH"]["min_amount_20d"] == pytest.approx(8_000_000.0)
+    assert rows["AAA.SH"]["position_to_amount_20d_ratio"] == pytest.approx(0.08)
+    assert rows["BBB.SZ"]["position_to_amount_20d_ratio"] == pytest.approx(0.22)
+
+
+def test_stock_candidate_spec_auto_adds_liquidity_capacity_stage(
+    tmp_path: Path,
+) -> None:
+    store = QoreStore(str(tmp_path / "qore.duckdb"), str(tmp_path / "raw"))
+    as_of = date(2026, 4, 19)
+    store.write(
+        "index_constituents",
+        pl.DataFrame(
+            {
+                "as_of": [as_of, as_of],
+                "index_symbol": ["8841431.WI", "8841431.WI"],
+                "symbol": ["AAA.SH", "BBB.SZ"],
+                "exchange": ["SH", "SZ"],
+                "industry": ["food", "battery"],
+            }
+        ),
+    )
+    store.write(
+        "stock_profiles",
+        pl.DataFrame(
+            {
+                "as_of": [as_of, as_of],
+                "symbol": ["AAA.SH", "BBB.SZ"],
+                "short_name": ["AAA", "BBB"],
+                "exchange": ["SH", "SZ"],
+                "industry": ["food", "battery"],
+                "board": ["MainBoard", "ChiNext"],
+                "listing_date": [date(2020, 1, 1), date(2020, 1, 1)],
+                "total_market_cap": [100.0, 80.0],
+                "float_market_cap": [70.0, 50.0],
+                "total_shares": [10.0, 8.0],
+                "float_shares": [7.0, 5.0],
+                "is_st": [False, False],
+            }
+        ),
+    )
+    store.write(
+        "stock_ohlcv",
+        pl.DataFrame(
+            {
+                "date": [as_of, as_of],
+                "symbol": ["AAA.SH", "BBB.SZ"],
+                "open": [10.0, 20.0],
+                "high": [10.5, 20.5],
+                "low": [9.8, 19.5],
+                "close": [10.1, 20.2],
+                "volume": [100, 200],
+                "amount": [8_000_000.0, 3_000_000.0],
+                "adj_factor": [1.0, 1.0],
+                "is_suspended": [False, False],
+                "limit_up": [False, False],
+                "limit_down": [False, False],
+            }
+        ),
+    )
+    store.write(
+        "factor_scores",
+        pl.DataFrame(
+            {
+                "date": [as_of] * 6,
+                "symbol": [
+                    "AAA.SH",
+                    "AAA.SH",
+                    "AAA.SH",
+                    "BBB.SZ",
+                    "BBB.SZ",
+                    "BBB.SZ",
+                ],
+                "factor_name": [
+                    "avg_amount_20d",
+                    "min_amount_20d",
+                    "position_to_amount_20d_ratio",
+                    "avg_amount_20d",
+                    "min_amount_20d",
+                    "position_to_amount_20d_ratio",
+                ],
+                "raw_value": [
+                    10_000_000.0,
+                    8_000_000.0,
+                    0.08,
+                    4_000_000.0,
+                    3_500_000.0,
+                    0.22,
+                ],
+                "z_score": [0.0] * 6,
+                "rank_pct": [0.5] * 6,
+            }
+        ),
+    )
+
+    candidates = StockSelectionPipeline.from_index(
+        store,
+        index_symbol="8841431.WI",
+        as_of=as_of,
+    ).candidates(
+        StockCandidateSpec(
+            filters=(CandidateFilter("position_to_amount_20d_ratio", "lt", 0.10),),
+            sort_by=(CandidateSort("avg_amount_20d", descending=True),),
+        )
+    )
+
+    assert candidates.get_column("symbol").to_list() == ["AAA.SH"]
