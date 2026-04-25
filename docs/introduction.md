@@ -15,7 +15,7 @@ Current runtime crates:
 
 Current runnable end-to-end reference:
 
-- `examples/stock_ranking_workflow.py`
+- workspace package: `examples/small_cap_strategy`
 
 ## Configuration model (merged reference)
 

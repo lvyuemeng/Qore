@@ -21,7 +21,7 @@ Active runtime crates:
 2. Crate-local typed settings for crate internals.
 3. Workflow/composition layer can adapt external config to crate settings.
 4. Deterministic behavior for runner and backtest execution.
-5. Library-first crates; examples for runnable flows.
+5. Library-first crates with clean composition boundaries.
 
 ## Crate responsibilities
 
@@ -113,4 +113,3 @@ Plot backend dependency is managed through uv dependency group `viz`.
 - user workflow intro: `docs/introduction.md`
 - contributor workflow: `docs/workflow.md`
 - active checklist and priorities: `docs/roadmap.md`
-- runnable composition example: `examples/stock_ranking_workflow.py`
