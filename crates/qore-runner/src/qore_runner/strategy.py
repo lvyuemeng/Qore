@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Literal, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import polars as pl
 from qore_data.universe import TradingSession, Universe
 
 from qore_runner.calendar import TradingCalendar
+from qore_runner.schedule import RebalanceSchedule
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,10 +39,11 @@ class StrategyContext:
 class Strategy(Protocol):
     name: str
     compatible_sessions: frozenset[TradingSession]
-    signal_freq: Literal["event", "daily", "weekly", "monthly"]
 
     @property
     def required_columns(self) -> frozenset[str]: ...
+
+    def strategy_rebalance_schedule(self) -> RebalanceSchedule: ...
 
     def generate(self, context: StrategyContext) -> pl.LazyFrame:
         """Returns a LazyFrame with `symbol` and `signal` columns."""

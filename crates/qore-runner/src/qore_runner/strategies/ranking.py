@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 import polars as pl
 from qore_data.universe import TradingSession
 
+from qore_runner.schedule import RebalanceSchedule
 from qore_runner.strategy import (
     StrategyContext,
     align_signals_to_universe,
@@ -81,7 +82,16 @@ class RankingStrategy:
     compatible_sessions: frozenset[TradingSession] = frozenset(
         {"auction", "nav", "continuous"}
     )
-    signal_freq: Literal["event", "daily", "weekly", "monthly"] = "weekly"
+    rebalance_schedule: RebalanceSchedule = field(
+        default_factory=lambda: RebalanceSchedule(frequency="weekly")
+    )
+
+    @property
+    def signal_freq(self) -> Literal["event", "daily", "weekly", "monthly"]:
+        return self.rebalance_schedule.frequency
+
+    def strategy_rebalance_schedule(self) -> RebalanceSchedule:
+        return self.rebalance_schedule
 
     @property
     def required_columns(self) -> frozenset[str]:

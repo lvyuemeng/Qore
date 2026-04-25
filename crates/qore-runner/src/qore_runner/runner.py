@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
 
 import polars as pl
 
@@ -26,6 +25,7 @@ class TargetPortfolio:
     date: date
     weights_frame: pl.DataFrame
     signals: pl.DataFrame
+    decision_signals: pl.DataFrame
     decision: StrategyDecision
     diagnostics: RunnerDiagnostics
 
@@ -51,12 +51,19 @@ class StrategyRunner:
         self,
         context: StrategyContext,
         nav: pl.Series,
+        current_weights: pl.DataFrame | None = None,
     ) -> TargetPortfolio:
+        self._validate_factor_contract(context)
         signal_lf = self.strategy.generate(context)
-        prepared_signal_frame, sized_target_frame = self.sizer.pipe(
+        prepared_signal_frame, _ = self.sizer.pipe(
             signal_lf,
             context.factor_lf,
             max_single=self.settings.max_single,
+        )
+        current_weights_frame = (
+            current_weights
+            if current_weights is not None
+            else pl.DataFrame(schema={"symbol": pl.String, "weight": pl.Float64})
         )
         decision = self._resolve_decision(context, prepared_signal_frame, nav)
         selected_signal_frame = pl.DataFrame(
@@ -70,18 +77,37 @@ class StrategyRunner:
             .drop("selected")
             .collect()
         )
-        selected_weights_frame = _selected_weights_frame(
-            sized_target_frame,
-            decision.frame,
+        selected_weights_frame = self.sizer.cap(
+            self.sizer.size(selected_signal_frame),
+            max_single=self.settings.max_single,
         )
-        diagnostics = self._diagnostics(prepared_signal_frame, decision, nav)
+        decision_signals = decision.execution_signals(
+            target_weights=selected_weights_frame,
+            current_weights=current_weights_frame,
+        )
+        diagnostics = self._diagnostics(
+            prepared_signal_frame,
+            selected_weights_frame,
+            nav,
+        )
         return TargetPortfolio(
             date=context.date,
             weights_frame=selected_weights_frame,
             signals=selected_signal_frame,
+            decision_signals=decision_signals,
             decision=decision,
             diagnostics=diagnostics,
         )
+
+    def _validate_factor_contract(self, context: StrategyContext) -> None:
+        schema_names = set(context.factor_lf.collect_schema().names())
+        if "symbol" not in schema_names:
+            msg = "Strategy factor frame must contain 'symbol' column."
+            raise ValueError(msg)
+        missing = sorted(self.strategy.required_columns - schema_names)
+        if missing:
+            msg = f"Missing required factor columns for strategy: {missing}"
+            raise ValueError(msg)
 
     def _resolve_decision(
         self,
@@ -90,7 +116,7 @@ class StrategyRunner:
         nav: pl.Series,
     ) -> StrategyDecision:
         has_external_overlay = context.providers.decision_overlay is not None
-        bucket = _schedule_bucket(self.strategy.signal_freq, context.date)
+        bucket = self.strategy.strategy_rebalance_schedule().bucket(context.date)
         if (
             not has_external_overlay
             and self._cached_decision is not None
@@ -114,7 +140,7 @@ class StrategyRunner:
     def _diagnostics(
         self,
         signal_frame: pl.DataFrame,
-        decision: StrategyDecision,
+        selected_weights_frame: pl.DataFrame,
         nav: pl.Series,
     ) -> RunnerDiagnostics:
         signal_count = (
@@ -129,8 +155,8 @@ class StrategyRunner:
             if not signal_frame.is_empty() and "signal" in signal_frame.columns
             else 0
         )
-        selected_count = int(decision.frame.filter(pl.col("selected")).height)
-        non_selected_count = int(decision.frame.height - selected_count)
+        selected_count = int(selected_weights_frame.height)
+        non_selected_count = int(max(signal_frame.height - selected_count, 0))
         drawdown_blocked = False
         if len(nav) > 1:
             peak_value = nav.max()
@@ -149,34 +175,3 @@ class StrategyRunner:
             non_selected_count=non_selected_count,
             drawdown_blocked=drawdown_blocked,
         )
-
-
-def _schedule_bucket(
-    freq: Literal["event", "daily", "weekly", "monthly"],
-    as_of: date,
-) -> tuple[int, int, int] | tuple[int, int] | date:
-    if freq in {"event", "daily"}:
-        return as_of
-    if freq == "weekly":
-        iso_year, iso_week, _ = as_of.isocalendar()
-        return (iso_year, iso_week)
-    return (as_of.year, as_of.month)
-
-
-def _selected_weights_frame(
-    target_frame: pl.DataFrame,
-    decision_frame: pl.DataFrame,
-) -> pl.DataFrame:
-    if target_frame.is_empty() or decision_frame.is_empty():
-        return pl.DataFrame(schema={"symbol": pl.String, "weight": pl.Float64})
-    return pl.DataFrame(
-        target_frame.lazy()
-        .join(
-            decision_frame.lazy().select("symbol", "selected"),
-            on="symbol",
-            how="left",
-        )
-        .filter(pl.col("selected").fill_null(False))
-        .select("symbol", "weight")
-        .collect()
-    )

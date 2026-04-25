@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import polars as pl
 from qore_data.universe import TradingSession
 
+from qore_runner.schedule import RebalanceSchedule
 from qore_runner.strategy import (
     StrategyContext,
     align_signals_to_universe,
@@ -18,7 +19,16 @@ class CrossSectionalScreener:
     factor_weights: dict[str, float]
     name: str = "cross_sectional_screener"
     compatible_sessions: frozenset[TradingSession] = frozenset({"nav", "auction"})
-    signal_freq: Literal["event", "daily", "weekly", "monthly"] = "monthly"
+    rebalance_schedule: RebalanceSchedule = field(
+        default_factory=lambda: RebalanceSchedule(frequency="monthly")
+    )
+
+    @property
+    def signal_freq(self) -> Literal["event", "daily", "weekly", "monthly"]:
+        return self.rebalance_schedule.frequency
+
+    def strategy_rebalance_schedule(self) -> RebalanceSchedule:
+        return self.rebalance_schedule
 
     @property
     def required_columns(self) -> frozenset[str]:

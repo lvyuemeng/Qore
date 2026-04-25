@@ -18,6 +18,7 @@ from qore_runner.runner import (
     StrategyRunner,
     TargetPortfolio,
 )
+from qore_runner.schedule import RebalanceFrequency, RebalanceSchedule
 from qore_runner.sizer import EqualWeightSizer, PositionSizer, VolScaledSizer
 from qore_runner.strategies.behavioral import BehavioralGatedStrategy
 from qore_runner.strategies.crosssectional import CrossSectionalScreener
@@ -36,6 +37,8 @@ __all__ = [
     "EqualWeightSizer",
     "PositionSizer",
     "RankingStrategy",
+    "RebalanceFrequency",
+    "RebalanceSchedule",
     "RunnerDiagnostics",
     "RunnerSettings",
     "Strategy",

@@ -40,6 +40,109 @@ class StrategyDecision:
             .to_list()
         )
 
+    def execution_signals(
+        self,
+        *,
+        target_weights: pl.DataFrame,
+        current_weights: pl.DataFrame,
+    ) -> pl.DataFrame:
+        if (
+            self.frame.is_empty()
+            and target_weights.is_empty()
+            and current_weights.is_empty()
+        ):
+            return pl.DataFrame(
+                schema={
+                    "date": pl.Date,
+                    "symbol": pl.String,
+                    "signal": pl.String,
+                    "weight_target": pl.Float64,
+                    "weight_current": pl.Float64,
+                    "weight_delta": pl.Float64,
+                    "reason": pl.String,
+                    "score_value": pl.Float64,
+                }
+            )
+
+        decision_frame = pl.DataFrame(
+            self.frame.lazy()
+            .select(
+                pl.col("symbol").cast(pl.String, strict=False),
+                (
+                    pl.col("exclude_reason").cast(pl.String, strict=False)
+                    if "exclude_reason" in self.frame.columns
+                    else pl.lit(None, dtype=pl.String)
+                ).alias("reason"),
+                (
+                    pl.col("signal").cast(pl.Float64, strict=False)
+                    if "signal" in self.frame.columns
+                    else pl.lit(None, dtype=pl.Float64)
+                ).alias("score_value"),
+            )
+            .filter(pl.col("symbol").is_not_null())
+            .unique(subset=["symbol"], keep="last")
+            .collect()
+        )
+        target_frame = pl.DataFrame(
+            target_weights.lazy()
+            .select(
+                pl.col("symbol").cast(pl.String, strict=False),
+                pl.col("weight").cast(pl.Float64, strict=False).alias("weight_target"),
+            )
+            .filter(pl.col("symbol").is_not_null())
+            .unique(subset=["symbol"], keep="last")
+            .collect()
+        )
+        current_frame = pl.DataFrame(
+            current_weights.lazy()
+            .select(
+                pl.col("symbol").cast(pl.String, strict=False),
+                pl.col("weight").cast(pl.Float64, strict=False).alias("weight_current"),
+            )
+            .filter(pl.col("symbol").is_not_null())
+            .unique(subset=["symbol"], keep="last")
+            .collect()
+        )
+
+        epsilon = 1e-12
+        return pl.DataFrame(
+            target_frame.lazy()
+            .join(current_frame.lazy(), on="symbol", how="full", coalesce=True)
+            .join(decision_frame.lazy(), on="symbol", how="left")
+            .with_columns(
+                pl.col("weight_target").cast(pl.Float64, strict=False).fill_null(0.0),
+                pl.col("weight_current").cast(pl.Float64, strict=False).fill_null(0.0),
+            )
+            .with_columns(
+                (pl.col("weight_target") - pl.col("weight_current")).alias(
+                    "weight_delta"
+                )
+            )
+            .with_columns(
+                pl.when(pl.col("weight_delta") > epsilon)
+                .then(pl.lit("buy"))
+                .when(pl.col("weight_delta") < -epsilon)
+                .then(pl.lit("sell"))
+                .when(pl.col("weight_target") > epsilon)
+                .then(pl.lit("hold"))
+                .otherwise(pl.lit(None, dtype=pl.String))
+                .alias("signal")
+            )
+            .filter(pl.col("signal").is_not_null())
+            .with_columns(pl.lit(self.as_of).cast(pl.Date).alias("date"))
+            .select(
+                "date",
+                "symbol",
+                "signal",
+                "weight_target",
+                "weight_current",
+                "weight_delta",
+                "reason",
+                "score_value",
+            )
+            .collect()
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class DecisionPipeline:

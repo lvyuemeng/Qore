@@ -7,6 +7,7 @@ from typing import Literal, Protocol
 import polars as pl
 from qore_data.universe import TradingSession
 
+from qore_runner.schedule import RebalanceSchedule
 from qore_runner.strategy import Strategy, StrategyContext
 
 
@@ -26,9 +27,12 @@ class BehavioralGatedStrategy:
     def compatible_sessions(self) -> frozenset[TradingSession]:
         return self.base.compatible_sessions
 
+    def strategy_rebalance_schedule(self) -> RebalanceSchedule:
+        return self.base.strategy_rebalance_schedule()
+
     @property
     def signal_freq(self) -> Literal["event", "daily", "weekly", "monthly"]:
-        return self.base.signal_freq
+        return self.strategy_rebalance_schedule().frequency
 
     @property
     def required_columns(self) -> frozenset[str]:
