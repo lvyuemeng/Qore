@@ -103,3 +103,28 @@ def test_backtest_view_plot_equity_smoke() -> None:
     figure = _result_fixture().view().plot().equity()
 
     assert figure is not None
+
+
+def test_backtest_view_plot_timeseries_smoke() -> None:
+    pytest.importorskip("matplotlib.pyplot")
+
+    series = pl.DataFrame(
+        {
+            "date": [date(2026, 4, 13), date(2026, 4, 14), date(2026, 4, 15)],
+            "avg_selected_factor": [10.0, 11.5, 10.8],
+        }
+    )
+    figure = (
+        _result_fixture()
+        .view()
+        .plot()
+        .timeseries(
+            series,
+            date_col="date",
+            value_col="avg_selected_factor",
+            title="Selected average total_market_cap",
+            ylabel="total_market_cap",
+        )
+    )
+
+    assert figure is not None

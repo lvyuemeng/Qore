@@ -1,29 +1,148 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Protocol
 
 import polars as pl
 from qore_data.store.duckdb import QoreStore
 from qore_data.universe import Universe
 from qore_runner import RunnerSettings
 from qore_runner.calendar import TradingCalendar
-from qore_runner.runner import StrategyRunner, TargetPortfolio
+from qore_runner.runner import StrategyRunner
 from qore_runner.sizer import PositionSizer
 from qore_runner.strategy import Strategy, StrategyContext, StrategyProviderFrames
 
 from qore_backtest import BacktestSettings
-from qore_backtest.simulate import (
-    TradingSession,
-    fill_order_from_market_row,
-)
 
 if TYPE_CHECKING:
     from qore_backtest.view import BacktestView
+
+
+class DayFrameSource(Protocol):
+    def frame_for_day(
+        self, trading_day: date
+    ) -> pl.DataFrame | pl.LazyFrame | None: ...
+
+
+class DatasetDayFrameSource(Protocol):
+    def frame_for_day(
+        self,
+        dataset: str,
+        trading_day: date,
+    ) -> pl.DataFrame | pl.LazyFrame | None: ...
+
+
+FactorSource = DayFrameSource
+SignalOverlaySource = DayFrameSource
+MarketDataSource = DatasetDayFrameSource
+
+
+@dataclass(frozen=True, slots=True)
+class MappingDayFrameSource:
+    by_day: Mapping[date, pl.DataFrame | pl.LazyFrame | None]
+
+    def frame_for_day(
+        self,
+        trading_day: date,
+    ) -> pl.DataFrame | pl.LazyFrame | None:
+        return self.by_day.get(trading_day)
+
+
+@dataclass(frozen=True, slots=True)
+class StoreFactorSource:
+    store: QoreStore
+    dataset: str = "strategy_factors"
+    date_column: str = "date"
+    symbol_column: str = "symbol"
+    factor_columns: tuple[str, ...] | None = None
+    base_filters: Mapping[str, object] = field(default_factory=dict)
+
+    def frame_for_day(
+        self,
+        trading_day: date,
+    ) -> pl.DataFrame | pl.LazyFrame | None:
+        filters: dict[str, object] = dict(self.base_filters)
+        filters[self.date_column] = trading_day
+        selected_columns = (
+            [self.symbol_column, *self.factor_columns] if self.factor_columns else None
+        )
+        frame = self.store.read(
+            self.dataset,
+            filters=filters,
+            columns=selected_columns,
+            backend="duckdb",
+        ).collect()
+        if frame.is_empty():
+            return None
+        keep_columns = [
+            column
+            for column in frame.columns
+            if column not in {self.date_column, self.symbol_column}
+        ]
+        return pl.DataFrame(
+            frame.lazy()
+            .select(
+                pl.col(self.symbol_column)
+                .cast(pl.String, strict=False)
+                .alias("symbol"),
+                *[
+                    pl.col(column).cast(pl.Float64, strict=False).alias(column)
+                    for column in keep_columns
+                ],
+            )
+            .filter(pl.col("symbol").is_not_null())
+            .unique(subset=["symbol"], keep="last")
+            .collect()
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StoreMarketDataSource:
+    store: QoreStore
+
+    def frame_for_day(
+        self,
+        dataset: str,
+        trading_day: date,
+    ) -> pl.DataFrame | pl.LazyFrame | None:
+        return self.store.read(
+            dataset,
+            filters={"date": trading_day},
+            backend="duckdb",
+        ).collect()
+
+
+@dataclass(frozen=True, slots=True)
+class StoreSignalOverlaySource:
+    store: QoreStore
+    dataset: str = "news_scores"
+    value_column: str = "score"
+
+    def frame_for_day(
+        self,
+        trading_day: date,
+    ) -> pl.DataFrame | pl.LazyFrame | None:
+        return self.store.read(
+            self.dataset,
+            filters={"date": trading_day},
+            columns=["symbol", self.value_column],
+            backend="duckdb",
+        ).select(
+            pl.col("symbol"),
+            pl.col(self.value_column).alias("overlay"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NullSignalOverlaySource:
+    def frame_for_day(
+        self,
+        trading_day: date,
+    ) -> pl.DataFrame | pl.LazyFrame | None:
+        del trading_day
+        return None
 
 
 @dataclass(slots=True)
@@ -58,42 +177,73 @@ class BacktestRunState:
     @classmethod
     def initialize(cls, *, initial_capital: float) -> BacktestRunState:
         return cls(
-            current_weights_frame=_empty_weights_frame(),
+            current_weights_frame=pl.DataFrame(
+                schema={"symbol": pl.String, "weight": pl.Float64}
+            ),
             nav_value=initial_capital,
-            nav_frame=_empty_nav_frame(),
-            positions_frame=_empty_positions_frame(),
-            turnover_frame=_empty_turnover_frame(),
-            fills_frame=_empty_fills_frame(),
-            diagnostics_frame=_empty_diagnostics_frame(),
+            nav_frame=pl.DataFrame(
+                schema={"date": pl.Date, "nav": pl.Float64, "return": pl.Float64}
+            ),
+            positions_frame=pl.DataFrame(
+                schema={"date": pl.Date, "symbol": pl.String, "weight": pl.Float64}
+            ),
+            turnover_frame=pl.DataFrame(
+                schema={
+                    "date": pl.Date,
+                    "turnover": pl.Float64,
+                    "commission": pl.Float64,
+                    "risk_flag": pl.Boolean,
+                }
+            ),
+            fills_frame=pl.DataFrame(
+                schema={
+                    "date": pl.Date,
+                    "symbol": pl.String,
+                    "status": pl.String,
+                    "fill_date": pl.Date,
+                    "fill_price": pl.Float64,
+                    "quantity": pl.Float64,
+                    "reason": pl.String,
+                }
+            ),
+            diagnostics_frame=pl.DataFrame(
+                schema={
+                    "date": pl.Date,
+                    "nav": pl.Float64,
+                    "daily_return": pl.Float64,
+                    "turnover": pl.Float64,
+                    "commission_cost": pl.Float64,
+                    "fill_request_count": pl.Int64,
+                    "filled_count": pl.Int64,
+                    "pending_count": pl.Int64,
+                    "rejected_count": pl.Int64,
+                    "candidate_count": pl.Int64,
+                    "signal_count": pl.Int64,
+                    "selected_count": pl.Int64,
+                    "drawdown_blocked": pl.Boolean,
+                    "force_exit_count": pl.Int64,
+                    "decision_non_selected_count": pl.Int64,
+                    "forced_liquidation_symbols": pl.String,
+                    "decision_selected_count": pl.Int64,
+                    "decision_new_symbols": pl.String,
+                    "decision_dropped_symbols": pl.String,
+                    "decision_snapshot_as_of": pl.Date,
+                }
+            ),
             previous_selected_symbols=set(),
         )
-
-
-@dataclass(frozen=True, slots=True)
-class BacktestDaySummary:
-    trading_day: date
-    target: TargetPortfolio
-    fill_requests: pl.DataFrame
-    fills: pl.DataFrame
-    turnover: float
-    commission_cost: float
-    daily_return: float
-    nav_value: float
-    force_exit_count: int
-    decision_non_selected_count: int
-    forced_liquidation_symbols: str
-    decision_selected_count: int
-    decision_new_symbols: str
-    decision_dropped_symbols: str
-    decision_snapshot_as_of: date
 
 
 @dataclass(slots=True)
 class BacktestEngine:
     runner: StrategyRunner
-    store: QoreStore
     config: BacktestSettings
     calendar: TradingCalendar
+    factor_source: FactorSource
+    market_data_source: MarketDataSource
+    signal_overlay_source: SignalOverlaySource = field(
+        default_factory=NullSignalOverlaySource
+    )
     _market_data_cache: dict[tuple[str, date], pl.DataFrame] = field(
         default_factory=dict
     )
@@ -107,16 +257,21 @@ class BacktestEngine:
         cls,
         settings: BacktestSettings,
         runner: StrategyRunner,
-        store: QoreStore,
         calendar: TradingCalendar,
+        *,
+        factor_source: FactorSource,
+        market_data_source: MarketDataSource,
         decision_overlays_by_day: Mapping[date, pl.DataFrame] | None = None,
+        signal_overlay_source: SignalOverlaySource | None = None,
     ) -> BacktestEngine:
         return cls(
             runner=runner,
-            store=store,
             config=settings,
             calendar=calendar,
             decision_overlays_by_day=decision_overlays_by_day or {},
+            factor_source=factor_source,
+            market_data_source=market_data_source,
+            signal_overlay_source=signal_overlay_source or NullSignalOverlaySource(),
         )
 
     @classmethod
@@ -127,17 +282,21 @@ class BacktestEngine:
         strategy: Strategy,
         sizer: PositionSizer,
         runner_settings: RunnerSettings,
-        store: QoreStore,
         calendar: TradingCalendar,
+        factor_source: FactorSource,
+        market_data_source: MarketDataSource,
         decision_overlays_by_day: Mapping[date, pl.DataFrame] | None = None,
+        signal_overlay_source: SignalOverlaySource | None = None,
     ) -> BacktestEngine:
         runner = StrategyRunner.from_settings(runner_settings, strategy, sizer)
         return cls.from_settings(
             settings,
             runner,
-            store,
             calendar,
+            factor_source=factor_source,
+            market_data_source=market_data_source,
             decision_overlays_by_day=decision_overlays_by_day,
+            signal_overlay_source=signal_overlay_source,
         )
 
     def run(
@@ -165,14 +324,15 @@ class BacktestEngine:
             target = self.runner.step(
                 context=strategy_context,
                 nav=nav_series,
+                current_weights=state.current_weights_frame,
             )
-            selected_symbols = set(target.decision.selected_symbols)
-            selected_new_symbols = sorted(
-                selected_symbols - state.previous_selected_symbols
+            selected_symbols = set(
+                target.weights_frame.get_column("symbol").to_list()
+                if not target.weights_frame.is_empty()
+                else []
             )
-            selected_dropped_symbols = sorted(
-                state.previous_selected_symbols - selected_symbols
-            )
+            selected_new_symbols: list[str] = []
+            selected_dropped_symbols: list[str] = []
             current_symbols = set(
                 state.current_weights_frame.get_column("symbol").to_list()
                 if not state.current_weights_frame.is_empty()
@@ -185,10 +345,7 @@ class BacktestEngine:
                 target.weights_frame,
                 forced_liquidation_symbols,
             )
-            fill_requests = self._fill_requests_frame(
-                effective_target_weights_frame,
-                state.current_weights_frame,
-            )
+            fill_requests = self._fill_requests_frame(target.decision_signals)
             day_fills = self._fills_for_requests(
                 fill_requests,
                 trading_day,
@@ -204,46 +361,52 @@ class BacktestEngine:
             )
             state.nav_value = state.nav_value * (1.0 + daily_return) - commission_cost
 
-            summary = BacktestDaySummary(
-                trading_day=trading_day,
-                target=target,
-                fill_requests=fill_requests,
-                fills=day_fills,
-                turnover=turnover,
-                commission_cost=commission_cost,
-                daily_return=daily_return,
-                nav_value=state.nav_value,
-                force_exit_count=len(target.decision.force_exit_symbols),
-                decision_non_selected_count=(
-                    target.decision.frame.height - len(target.decision.selected_symbols)
-                ),
-                forced_liquidation_symbols="|".join(forced_liquidation_symbols),
-                decision_selected_count=len(selected_symbols),
-                decision_new_symbols="|".join(selected_new_symbols),
-                decision_dropped_symbols="|".join(selected_dropped_symbols),
-                decision_snapshot_as_of=trading_day,
+            counts = (
+                day_fills.lazy()
+                .select(
+                    pl.col("status")
+                    .eq("filled")
+                    .sum()
+                    .fill_null(0)
+                    .alias("filled_count"),
+                    pl.col("status")
+                    .eq("pending")
+                    .sum()
+                    .fill_null(0)
+                    .alias("pending_count"),
+                    pl.col("status")
+                    .eq("rejected")
+                    .sum()
+                    .fill_null(0)
+                    .alias("rejected_count"),
+                )
+                .collect()
             )
+            filled_count = counts.get_column("filled_count").item()
+            pending_count = counts.get_column("pending_count").item()
+            rejected_count = counts.get_column("rejected_count").item()
+
             state.nav_frame = state.nav_frame.vstack(
                 pl.DataFrame(
                     {
-                        "date": [summary.trading_day],
-                        "nav": [summary.nav_value],
-                        "return": [summary.daily_return],
+                        "date": [trading_day],
+                        "nav": [state.nav_value],
+                        "return": [daily_return],
                     },
                     schema={"date": pl.Date, "nav": pl.Float64, "return": pl.Float64},
                 ),
                 in_place=False,
             )
             state.positions_frame = state.positions_frame.vstack(
-                _positions_for_day(summary.trading_day, effective_target_weights_frame),
+                _positions_for_day(trading_day, effective_target_weights_frame),
                 in_place=False,
             )
             state.turnover_frame = state.turnover_frame.vstack(
                 pl.DataFrame(
                     {
-                        "date": [summary.trading_day],
-                        "turnover": [summary.turnover],
-                        "commission": [summary.commission_cost],
+                        "date": [trading_day],
+                        "turnover": [turnover],
+                        "commission": [commission_cost],
                         "risk_flag": [target.diagnostics.drawdown_blocked],
                     },
                     schema={
@@ -255,9 +418,47 @@ class BacktestEngine:
                 ),
                 in_place=False,
             )
-            state.fills_frame = state.fills_frame.vstack(summary.fills, in_place=False)
+            state.fills_frame = state.fills_frame.vstack(day_fills, in_place=False)
             state.diagnostics_frame = state.diagnostics_frame.vstack(
-                _diagnostics_frame_from_summary(summary),
+                pl.DataFrame(
+                    {
+                        "date": [trading_day],
+                        "nav": [state.nav_value],
+                        "daily_return": [daily_return],
+                        "turnover": [turnover],
+                        "commission_cost": [commission_cost],
+                        "fill_request_count": [fill_requests.height],
+                        "filled_count": [
+                            int(filled_count) if isinstance(filled_count, int) else 0
+                        ],
+                        "pending_count": [
+                            int(pending_count) if isinstance(pending_count, int) else 0
+                        ],
+                        "rejected_count": [
+                            int(rejected_count)
+                            if isinstance(rejected_count, int)
+                            else 0
+                        ],
+                        "candidate_count": [target.diagnostics.candidate_count],
+                        "signal_count": [target.diagnostics.signal_count],
+                        "selected_count": [target.diagnostics.selected_count],
+                        "drawdown_blocked": [target.diagnostics.drawdown_blocked],
+                        "force_exit_count": [len(target.decision.force_exit_symbols)],
+                        "decision_non_selected_count": [
+                            target.diagnostics.non_selected_count
+                        ],
+                        "forced_liquidation_symbols": [
+                            "|".join(forced_liquidation_symbols)
+                        ],
+                        "decision_selected_count": [len(selected_symbols)],
+                        "decision_new_symbols": ["|".join(selected_new_symbols)],
+                        "decision_dropped_symbols": [
+                            "|".join(selected_dropped_symbols)
+                        ],
+                        "decision_snapshot_as_of": [trading_day],
+                    },
+                    schema=state.diagnostics_frame.schema,
+                ),
                 in_place=False,
             )
             state.current_weights_frame = effective_target_weights_frame
@@ -280,20 +481,27 @@ class BacktestEngine:
         cached = self._factor_frame_cache.get(trading_day)
         if cached is not None:
             return cached.lazy()
-        factor_scores = self.store.read(
-            "factor_scores",
-            filters={"date": trading_day},
-            columns=["symbol", "factor_name", "z_score"],
-            backend="duckdb",
-        )
-        frame = factor_scores.collect()
+        source_frame = self.factor_source.frame_for_day(trading_day)
+        frame = self._materialize_source_frame(source_frame)
         if frame.is_empty():
-            empty = pl.DataFrame({"symbol": []}, schema={"symbol": pl.String})
-            self._factor_frame_cache[trading_day] = empty
-            return empty.lazy()
-        pivoted = frame.pivot(on="factor_name", index="symbol", values="z_score")
-        self._factor_frame_cache[trading_day] = pivoted
-        return pivoted.lazy()
+            frame = pl.DataFrame(schema={"symbol": pl.String})
+        schema_names = set(frame.columns)
+        if "factor_name" in schema_names:
+            msg = (
+                "Factor provider long-frame contracts using 'factor_name' are no longer supported "
+                f"(date={trading_day.isoformat()}). Provide a wide symbol-indexed frame."
+            )
+            raise ValueError(msg)
+        if "symbol" in schema_names:
+            frame = pl.DataFrame(
+                frame.lazy()
+                .with_columns(pl.col("symbol").cast(pl.String, strict=False))
+                .filter(pl.col("symbol").is_not_null())
+                .unique(subset=["symbol"], keep="last")
+                .collect()
+            )
+        self._factor_frame_cache[trading_day] = frame
+        return frame.lazy()
 
     def _strategy_context_for_day(
         self,
@@ -318,20 +526,16 @@ class BacktestEngine:
     def _signal_overlay_frame_for_day(self, trading_day: date) -> pl.DataFrame | None:
         if trading_day in self._signal_overlay_cache:
             return self._signal_overlay_cache[trading_day]
-        news = self.store.read(
-            "news_scores",
-            filters={"date": trading_day},
-            columns=["symbol", "score"],
-            backend="duckdb",
-        ).collect()
-        if news.is_empty():
+        source_frame = self.signal_overlay_source.frame_for_day(trading_day)
+        overlay = self._materialize_source_frame(source_frame)
+        if overlay.is_empty():
             self._signal_overlay_cache[trading_day] = None
             return None
         normalized = pl.DataFrame(
-            news.lazy()
+            overlay.lazy()
             .select(
                 pl.col("symbol").cast(pl.String, strict=False),
-                pl.col("score").cast(pl.Float64, strict=False).alias("overlay"),
+                pl.col("overlay").cast(pl.Float64, strict=False),
             )
             .filter(pl.col("symbol").is_not_null())
             .unique(subset=["symbol"], keep="last")
@@ -387,7 +591,7 @@ class BacktestEngine:
             )
             if dataset_weights.is_empty():
                 continue
-            market = self._market_data_for_date(dataset_value, trading_day)
+            market = self._market_frame_for_day(dataset_value, trading_day)
             if market.is_empty():
                 continue
             daily_return_expr: pl.Expr = pl.lit(0.0)
@@ -430,152 +634,185 @@ class BacktestEngine:
         trading_day: date,
         execution_metadata: pl.DataFrame,
     ) -> pl.DataFrame:
+        empty_fills = pl.DataFrame(
+            schema={
+                "date": pl.Date,
+                "symbol": pl.String,
+                "status": pl.String,
+                "fill_date": pl.Date,
+                "fill_price": pl.Float64,
+                "quantity": pl.Float64,
+                "reason": pl.String,
+            }
+        )
         if requests.is_empty():
-            return _empty_fills_frame()
+            return empty_fills
         execution_plan = self._execution_plan(requests, trading_day, execution_metadata)
         joined_chunks: list[pl.DataFrame] = []
         for dataset, fill_date in (
             execution_plan.select("dataset", "fill_date").unique().iter_rows()
         ):
-            market_slice = self._market_data_for_date(str(dataset), fill_date)
+            market_slice = self._market_frame_for_day(str(dataset), fill_date)
             joined = execution_plan.filter(
                 (pl.col("dataset") == dataset) & (pl.col("fill_date") == fill_date)
             ).join(market_slice, on="symbol", how="left")
             joined_chunks.append(joined)
         if not joined_chunks:
-            return _empty_fills_frame()
-        open_expr: pl.Expr = pl.lit(None, dtype=pl.Float64)
-        if "open" in joined_chunks[0].columns:
-            open_expr = pl.col("open").cast(pl.Float64, strict=False)
-        nav_expr: pl.Expr = pl.lit(None, dtype=pl.Float64)
-        if "nav" in joined_chunks[0].columns:
-            nav_expr = pl.col("nav").cast(pl.Float64, strict=False)
-        joined_rows = (
-            pl.concat(joined_chunks, rechunk=False)
-            .lazy()
+            return empty_fills
+        base = pl.concat(joined_chunks, rechunk=False)
+        schema = set(base.columns)
+        open_expr: pl.Expr = (
+            pl.col("open").cast(pl.Float64, strict=False)
+            if "open" in schema
+            else pl.lit(None, dtype=pl.Float64)
+        )
+        nav_expr: pl.Expr = (
+            pl.col("nav").cast(pl.Float64, strict=False)
+            if "nav" in schema
+            else pl.lit(None, dtype=pl.Float64)
+        )
+        suspended_expr: pl.Expr = (
+            pl.col("is_suspended").cast(pl.Boolean, strict=False).fill_null(False)
+            if "is_suspended" in schema
+            else pl.lit(False, dtype=pl.Boolean)
+        )
+        limit_up_expr: pl.Expr = (
+            pl.col("limit_up").cast(pl.Boolean, strict=False).fill_null(False)
+            if "limit_up" in schema
+            else pl.lit(False, dtype=pl.Boolean)
+        )
+        limit_down_expr: pl.Expr = (
+            pl.col("limit_down").cast(pl.Boolean, strict=False).fill_null(False)
+            if "limit_down" in schema
+            else pl.lit(False, dtype=pl.Boolean)
+        )
+
+        slippage_buy = 1.0 + self.config.slippage
+        slippage_sell = 1.0 - self.config.slippage
+        fee_buy = 1.0 + self.config.commission
+        fee_sell = 1.0 - self.config.commission
+
+        filled_price_expr = (
+            pl.when(pl.col("session") == "nav")
+            .then(
+                pl.when(pl.col("direction") == "buy")
+                .then(pl.col("nav") * fee_buy)
+                .otherwise(pl.col("nav") * fee_sell)
+            )
+            .otherwise(
+                pl.when(pl.col("direction") == "buy")
+                .then(pl.col("open") * slippage_buy)
+                .otherwise(pl.col("open") * slippage_sell)
+            )
+        )
+
+        return pl.DataFrame(
+            base.lazy()
             .select(
+                pl.lit(trading_day).cast(pl.Date).alias("date"),
                 pl.col("symbol").cast(pl.String, strict=False),
                 pl.col("session").cast(pl.String, strict=False),
                 pl.col("direction").cast(pl.String, strict=False),
+                pl.col("fill_date").cast(pl.Date, strict=False),
                 pl.col("quantity").cast(pl.Float64, strict=False),
-                pl.col("buy_delay").cast(pl.Int64, strict=False).fill_null(1),
-                pl.col("sell_delay").cast(pl.Int64, strict=False).fill_null(2),
                 open_expr.alias("open"),
                 nav_expr.alias("nav"),
-                pl.col("is_suspended").cast(pl.Boolean, strict=False).fill_null(False),
-                pl.col("limit_up").cast(pl.Boolean, strict=False).fill_null(False),
-                pl.col("limit_down").cast(pl.Boolean, strict=False).fill_null(False),
+                suspended_expr.alias("is_suspended"),
+                limit_up_expr.alias("limit_up"),
+                limit_down_expr.alias("limit_down"),
+            )
+            .with_columns(
+                (
+                    pl.col("open").is_not_null()
+                    | pl.col("nav").is_not_null()
+                    | pl.col("is_suspended")
+                    | pl.col("limit_up")
+                    | pl.col("limit_down")
+                ).alias("has_market_row")
+            )
+            .with_columns(
+                pl.when(pl.col("session") == "nav")
+                .then(
+                    pl.when(~pl.col("has_market_row"))
+                    .then(pl.lit("rejected"))
+                    .when(pl.col("nav") <= 0.0)
+                    .then(pl.lit("rejected"))
+                    .otherwise(pl.lit("filled"))
+                )
+                .when(pl.col("session") == "continuous")
+                .then(
+                    pl.when(~pl.col("has_market_row"))
+                    .then(pl.lit("rejected"))
+                    .when(pl.col("open") <= 0.0)
+                    .then(pl.lit("rejected"))
+                    .otherwise(pl.lit("filled"))
+                )
+                .otherwise(
+                    pl.when(~pl.col("has_market_row"))
+                    .then(pl.lit("rejected"))
+                    .when(pl.col("is_suspended"))
+                    .then(pl.lit("rejected"))
+                    .when((pl.col("direction") == "buy") & pl.col("limit_up"))
+                    .then(pl.lit("pending"))
+                    .when((pl.col("direction") == "sell") & pl.col("limit_down"))
+                    .then(pl.lit("pending"))
+                    .when(pl.col("open") <= 0.0)
+                    .then(pl.lit("rejected"))
+                    .otherwise(pl.lit("filled"))
+                )
+                .alias("status"),
+            )
+            .with_columns(
+                pl.when(pl.col("session") == "nav")
+                .then(
+                    pl.when(~pl.col("has_market_row"))
+                    .then(pl.lit("missing nav data"))
+                    .when(pl.col("nav") <= 0.0)
+                    .then(pl.lit("invalid nav"))
+                    .otherwise(pl.lit(None, dtype=pl.String))
+                )
+                .when(pl.col("session") == "continuous")
+                .then(
+                    pl.when(~pl.col("has_market_row"))
+                    .then(pl.lit("missing derivative data"))
+                    .when(pl.col("open") <= 0.0)
+                    .then(pl.lit("invalid open price"))
+                    .otherwise(pl.lit(None, dtype=pl.String))
+                )
+                .otherwise(
+                    pl.when(~pl.col("has_market_row"))
+                    .then(pl.lit("missing price data"))
+                    .when(pl.col("is_suspended"))
+                    .then(pl.lit("suspended"))
+                    .when((pl.col("direction") == "buy") & pl.col("limit_up"))
+                    .then(pl.lit("limit up"))
+                    .when((pl.col("direction") == "sell") & pl.col("limit_down"))
+                    .then(pl.lit("limit down"))
+                    .when(pl.col("open") <= 0.0)
+                    .then(pl.lit("invalid open price"))
+                    .otherwise(pl.lit(None, dtype=pl.String))
+                )
+                .alias("reason"),
+                pl.when(pl.col("status") == "filled")
+                .then(filled_price_expr)
+                .otherwise(pl.lit(None, dtype=pl.Float64))
+                .alias("fill_price"),
+                pl.when(pl.col("has_market_row"))
+                .then(pl.col("fill_date"))
+                .otherwise(pl.lit(None, dtype=pl.Date))
+                .alias("fill_date"),
+            )
+            .select(
+                "date",
+                "symbol",
+                "status",
+                "fill_date",
+                "fill_price",
+                "quantity",
+                "reason",
             )
             .collect()
         )
-        return self._fills_from_frame(joined_rows, trading_day)
-
-    def _fills_from_frame(
-        self,
-        frame: pl.DataFrame,
-        trading_day: date,
-    ) -> pl.DataFrame:
-        if frame.is_empty():
-            return _empty_fills_frame()
-
-        def build_fill(
-            row: tuple[object, ...],
-        ) -> tuple[str, str, date | None, float | None, float, str | None] | None:
-            (
-                symbol,
-                session,
-                direction,
-                quantity,
-                buy_delay,
-                sell_delay,
-                open_,
-                nav,
-                suspended,
-                limit_up,
-                limit_down,
-            ) = row
-            if (
-                not isinstance(symbol, str)
-                or not isinstance(session, str)
-                or not isinstance(direction, str)
-                or not isinstance(quantity, (int, float))
-                or not isinstance(buy_delay, int)
-                or not isinstance(sell_delay, int)
-            ):
-                return None
-            fill = fill_order_from_market_row(
-                symbol,
-                cast(TradingSession, session),
-                trading_day,
-                cast(Literal["buy", "sell"], direction),
-                float(quantity),
-                {
-                    "open": open_ if isinstance(open_, (int, float)) else None,
-                    "nav": nav if isinstance(nav, (int, float)) else None,
-                    "is_suspended": bool(suspended),
-                    "limit_up": bool(limit_up),
-                    "limit_down": bool(limit_down),
-                },
-                self.config,
-                self.calendar,
-                buy_delay=buy_delay,
-                sell_delay=sell_delay,
-            )
-            return (
-                fill.symbol,
-                fill.status,
-                fill.fill_date,
-                fill.fill_price,
-                fill.quantity,
-                fill.reason,
-            )
-
-        def to_frame(
-            rows: list[tuple[str, str, date | None, float | None, float, str | None]],
-        ) -> pl.DataFrame:
-            if not rows:
-                return _empty_fills_frame()
-            symbols = [row[0] for row in rows]
-            statuses = [row[1] for row in rows]
-            fill_dates = [row[2] for row in rows]
-            fill_prices = [row[3] for row in rows]
-            quantities = [row[4] for row in rows]
-            reasons = [row[5] for row in rows]
-            return pl.DataFrame(
-                {
-                    "date": [trading_day] * len(rows),
-                    "symbol": symbols,
-                    "status": statuses,
-                    "fill_date": fill_dates,
-                    "fill_price": fill_prices,
-                    "quantity": quantities,
-                    "reason": reasons,
-                },
-                schema={
-                    "date": pl.Date,
-                    "symbol": pl.String,
-                    "status": pl.String,
-                    "fill_date": pl.Date,
-                    "fill_price": pl.Float64,
-                    "quantity": pl.Float64,
-                    "reason": pl.String,
-                },
-            )
-
-        row_iter = frame.iter_rows(named=False)
-        if frame.height < 64:
-            records = [
-                row_fill
-                for row in row_iter
-                if (row_fill := build_fill(row)) is not None
-            ]
-            return to_frame(records)
-
-        max_workers = max(1, min(8, (os.cpu_count() or 1)))
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            ordered = pool.map(build_fill, row_iter)
-            records = [row_fill for row_fill in ordered if row_fill is not None]
-            return to_frame(records)
 
     def _execution_plan(
         self,
@@ -593,12 +830,21 @@ class BacktestEngine:
                     "fill_date": pl.Date,
                 }
             )
+        schedule = self.runner.strategy.strategy_rebalance_schedule()
+        buy_delay_default = max(0, schedule.buy_delay)
+        sell_delay_default = max(0, schedule.sell_delay)
         plan = pl.DataFrame(
             requests.lazy()
             .join(execution_metadata.lazy(), on="symbol", how="left")
             .with_columns(
-                pl.col("buy_delay").cast(pl.Int64, strict=False).fill_null(1),
-                pl.col("sell_delay").cast(pl.Int64, strict=False).fill_null(2),
+                pl.col("buy_delay")
+                .cast(pl.Int64, strict=False)
+                .fill_null(pl.lit(buy_delay_default)),
+                pl.col("sell_delay")
+                .cast(pl.Int64, strict=False)
+                .fill_null(pl.lit(sell_delay_default)),
+            )
+            .with_columns(
                 pl.when(pl.col("direction") == "buy")
                 .then(pl.col("buy_delay"))
                 .otherwise(pl.col("sell_delay"))
@@ -631,8 +877,15 @@ class BacktestEngine:
             raise ValueError(msg)
         unique_delays = {
             int(delay)
-            for delay in plan.get_column("fill_delay").to_list()
-            if isinstance(delay, int)
+            for delay in pl.DataFrame(
+                plan.lazy()
+                .select(pl.col("fill_delay").cast(pl.Int64, strict=False).alias("d"))
+                .filter(pl.col("d").is_not_null())
+                .unique(subset=["d"])
+                .collect()
+            )
+            .get_column("d")
+            .to_list()
         }
         if not unique_delays:
             return plan.with_columns(pl.lit(trading_day).alias("fill_date")).drop(
@@ -663,10 +916,9 @@ class BacktestEngine:
 
     def _fill_requests_frame(
         self,
-        target_weights: pl.DataFrame,
-        current_weights: pl.DataFrame,
+        decision_signals: pl.DataFrame,
     ) -> pl.DataFrame:
-        if target_weights.is_empty() and current_weights.is_empty():
+        if decision_signals.is_empty():
             return pl.DataFrame(
                 schema={
                     "symbol": pl.String,
@@ -675,45 +927,48 @@ class BacktestEngine:
                 }
             )
         return pl.DataFrame(
-            target_weights.lazy()
-            .rename({"weight": "target_weight"})
-            .join(
-                current_weights.lazy().rename({"weight": "current_weight"}),
-                on="symbol",
-                how="full",
-                coalesce=True,
-            )
+            decision_signals.lazy()
+            .filter(pl.col("signal").is_in(["buy", "sell"]))
             .with_columns(
-                pl.col("target_weight").cast(pl.Float64, strict=False).fill_null(0.0),
-                pl.col("current_weight").cast(pl.Float64, strict=False).fill_null(0.0),
+                pl.col("signal").cast(pl.String, strict=False).alias("direction"),
+                pl.col("weight_delta")
+                .cast(pl.Float64, strict=False)
+                .abs()
+                .alias("quantity"),
             )
+            .filter(pl.col("quantity") > 1e-12)
             .with_columns(
-                (pl.col("target_weight") - pl.col("current_weight")).alias("delta")
-            )
-            .filter(pl.col("delta").abs() > 1e-12)
-            .with_columns(
-                pl.when(pl.col("delta") > 0.0)
+                pl.when(pl.col("direction") == "buy")
                 .then(pl.lit("buy"))
-                .otherwise(pl.lit("sell"))
+                .when(pl.col("direction") == "sell")
+                .then(pl.lit("sell"))
+                .otherwise(pl.lit(None, dtype=pl.String))
                 .alias("direction"),
-                pl.col("delta").abs().alias("quantity"),
             )
+            .filter(pl.col("direction").is_not_null())
             .select("symbol", "direction", "quantity")
             .collect()
         )
 
-    def _market_data_for_date(self, dataset: str, trading_day: date) -> pl.DataFrame:
+    def _market_frame_for_day(self, dataset: str, trading_day: date) -> pl.DataFrame:
         cache_key = (dataset, trading_day)
         cached = self._market_data_cache.get(cache_key)
         if cached is not None:
             return cached
-        frame = self.store.read(
-            dataset,
-            filters={"date": trading_day},
-            backend="duckdb",
-        ).collect()
+        source_frame = self.market_data_source.frame_for_day(dataset, trading_day)
+        frame = self._materialize_source_frame(source_frame)
         self._market_data_cache[cache_key] = frame
         return frame
+
+    def _materialize_source_frame(
+        self,
+        source_frame: pl.DataFrame | pl.LazyFrame | None,
+    ) -> pl.DataFrame:
+        if isinstance(source_frame, pl.LazyFrame):
+            return source_frame.collect()
+        if isinstance(source_frame, pl.DataFrame):
+            return source_frame
+        return pl.DataFrame()
 
     def _turnover(self, requests: pl.DataFrame) -> float:
         if requests.is_empty():
@@ -722,128 +977,16 @@ class BacktestEngine:
         return float(turnover) if isinstance(turnover, (int, float)) else 0.0
 
 
-def _empty_weights_frame() -> pl.DataFrame:
-    return pl.DataFrame(schema={"symbol": pl.String, "weight": pl.Float64})
-
-
-def _empty_nav_frame() -> pl.DataFrame:
-    return pl.DataFrame(
-        schema={"date": pl.Date, "nav": pl.Float64, "return": pl.Float64}
-    )
-
-
-def _empty_positions_frame() -> pl.DataFrame:
-    return pl.DataFrame(
-        schema={"date": pl.Date, "symbol": pl.String, "weight": pl.Float64}
-    )
-
-
-def _empty_turnover_frame() -> pl.DataFrame:
-    return pl.DataFrame(
-        schema={
-            "date": pl.Date,
-            "turnover": pl.Float64,
-            "commission": pl.Float64,
-            "risk_flag": pl.Boolean,
-        }
-    )
-
-
-def _empty_fills_frame() -> pl.DataFrame:
-    return pl.DataFrame(
-        schema={
-            "date": pl.Date,
-            "symbol": pl.String,
-            "status": pl.String,
-            "fill_date": pl.Date,
-            "fill_price": pl.Float64,
-            "quantity": pl.Float64,
-            "reason": pl.String,
-        }
-    )
-
-
 def _positions_for_day(trading_day: date, weights_frame: pl.DataFrame) -> pl.DataFrame:
     if weights_frame.is_empty():
-        return _empty_positions_frame()
+        return pl.DataFrame(
+            schema={"date": pl.Date, "symbol": pl.String, "weight": pl.Float64}
+        )
     return pl.DataFrame(
         weights_frame.lazy()
         .with_columns(pl.lit(trading_day).cast(pl.Date).alias("date"))
         .select("date", "symbol", "weight")
         .collect()
-    )
-
-
-def _empty_diagnostics_frame() -> pl.DataFrame:
-    return pl.DataFrame(schema=_diagnostics_schema())
-
-
-def _diagnostics_schema() -> dict[str, pl.DataType]:
-    return {
-        "date": pl.Date,
-        "nav": pl.Float64,
-        "daily_return": pl.Float64,
-        "turnover": pl.Float64,
-        "commission_cost": pl.Float64,
-        "fill_request_count": pl.Int64,
-        "filled_count": pl.Int64,
-        "pending_count": pl.Int64,
-        "rejected_count": pl.Int64,
-        "candidate_count": pl.Int64,
-        "signal_count": pl.Int64,
-        "selected_count": pl.Int64,
-        "drawdown_blocked": pl.Boolean,
-        "force_exit_count": pl.Int64,
-        "decision_non_selected_count": pl.Int64,
-        "forced_liquidation_symbols": pl.String,
-        "decision_selected_count": pl.Int64,
-        "decision_new_symbols": pl.String,
-        "decision_dropped_symbols": pl.String,
-        "decision_snapshot_as_of": pl.Date,
-    }
-
-
-def _diagnostics_frame_from_summary(summary: BacktestDaySummary) -> pl.DataFrame:
-    counts = (
-        summary.fills.lazy()
-        .select(
-            pl.col("status").eq("filled").sum().fill_null(0).alias("filled_count"),
-            pl.col("status").eq("pending").sum().fill_null(0).alias("pending_count"),
-            pl.col("status").eq("rejected").sum().fill_null(0).alias("rejected_count"),
-        )
-        .collect()
-    )
-    filled_count = counts.get_column("filled_count").item()
-    pending_count = counts.get_column("pending_count").item()
-    rejected_count = counts.get_column("rejected_count").item()
-    return pl.DataFrame(
-        {
-            "date": [summary.trading_day],
-            "nav": [summary.nav_value],
-            "daily_return": [summary.daily_return],
-            "turnover": [summary.turnover],
-            "commission_cost": [summary.commission_cost],
-            "fill_request_count": [summary.fill_requests.height],
-            "filled_count": [int(filled_count) if isinstance(filled_count, int) else 0],
-            "pending_count": [
-                int(pending_count) if isinstance(pending_count, int) else 0
-            ],
-            "rejected_count": [
-                int(rejected_count) if isinstance(rejected_count, int) else 0
-            ],
-            "candidate_count": [summary.target.diagnostics.candidate_count],
-            "signal_count": [summary.target.diagnostics.signal_count],
-            "selected_count": [summary.target.diagnostics.selected_count],
-            "drawdown_blocked": [summary.target.diagnostics.drawdown_blocked],
-            "force_exit_count": [summary.force_exit_count],
-            "decision_non_selected_count": [summary.decision_non_selected_count],
-            "forced_liquidation_symbols": [summary.forced_liquidation_symbols],
-            "decision_selected_count": [summary.decision_selected_count],
-            "decision_new_symbols": [summary.decision_new_symbols],
-            "decision_dropped_symbols": [summary.decision_dropped_symbols],
-            "decision_snapshot_as_of": [summary.decision_snapshot_as_of],
-        },
-        schema=_diagnostics_schema(),
     )
 
 
@@ -862,7 +1005,7 @@ def _apply_forced_liquidations(
     )
     return pl.DataFrame(
         weights_frame.lazy()
-        .join(forced.lazy(), on="symbol", how="left")
+        .join(forced.lazy(), on="symbol", how="full", coalesce=True)
         .with_columns(pl.coalesce("forced_weight", pl.col("weight")).alias("weight"))
         .drop("forced_weight")
         .with_columns(

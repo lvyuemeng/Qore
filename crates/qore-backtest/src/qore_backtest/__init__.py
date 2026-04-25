@@ -16,7 +16,18 @@ class BacktestSettings:
 
 from qore_runner.calendar import TradingCalendar
 
-from qore_backtest.engine import BacktestEngine, BacktestResult
+from qore_backtest.engine import (
+    BacktestEngine,
+    BacktestResult,
+    FactorSource,
+    MappingDayFrameSource,
+    MarketDataSource,
+    NullSignalOverlaySource,
+    SignalOverlaySource,
+    StoreFactorSource,
+    StoreMarketDataSource,
+    StoreSignalOverlaySource,
+)
 from qore_backtest.metrics import compute_metrics
 from qore_backtest.simulate import Fill, fill_order
 from qore_backtest.view import BacktestView
@@ -26,7 +37,15 @@ __all__ = [
     "BacktestResult",
     "BacktestSettings",
     "BacktestView",
+    "FactorSource",
     "Fill",
+    "MappingDayFrameSource",
+    "MarketDataSource",
+    "NullSignalOverlaySource",
+    "SignalOverlaySource",
+    "StoreFactorSource",
+    "StoreMarketDataSource",
+    "StoreSignalOverlaySource",
     "TradingCalendar",
     "compute_metrics",
     "fill_order",

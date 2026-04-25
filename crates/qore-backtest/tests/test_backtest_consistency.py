@@ -5,7 +5,13 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from qore_backtest import BacktestSettings, TradingCalendar
+from qore_backtest import (
+    BacktestSettings,
+    MappingDayFrameSource,
+    NullSignalOverlaySource,
+    StoreMarketDataSource,
+    TradingCalendar,
+)
 from qore_backtest.engine import BacktestEngine
 from qore_data import DataSettings
 from qore_data.store.duckdb import QoreStore
@@ -39,25 +45,7 @@ def _stock_universe(symbols: list[str]) -> Universe:
     )
 
 
-def _seed_factor_and_market_data(store: QoreStore) -> None:
-    store.write(
-        "factor_scores",
-        pl.DataFrame(
-            {
-                "date": [
-                    date(2026, 4, 13),
-                    date(2026, 4, 13),
-                    date(2026, 4, 14),
-                    date(2026, 4, 14),
-                ],
-                "symbol": ["AAA.SH", "BBB.SZ", "AAA.SH", "BBB.SZ"],
-                "factor_name": ["factor_a", "factor_a", "factor_a", "factor_a"],
-                "raw_value": [0.9, 0.1, 0.9, 0.1],
-                "z_score": [0.9, 0.1, 0.9, 0.1],
-                "rank_pct": [1.0, 0.5, 1.0, 0.5],
-            }
-        ),
-    )
+def _seed_market_data(store: QoreStore) -> None:
     store.write(
         "stock_ohlcv",
         pl.DataFrame(
@@ -89,7 +77,15 @@ def _seed_factor_and_market_data(store: QoreStore) -> None:
 
 def test_backtest_result_consistency_on_force_exit_transition(tmp_path: Path) -> None:
     store = QoreStore.from_settings(_data_settings(tmp_path))
-    _seed_factor_and_market_data(store)
+    _seed_market_data(store)
+    factor_by_day = {
+        date(2026, 4, 13): pl.DataFrame(
+            {"symbol": ["AAA.SH", "BBB.SZ"], "factor_a": [0.9, 0.1]}
+        ),
+        date(2026, 4, 14): pl.DataFrame(
+            {"symbol": ["AAA.SH", "BBB.SZ"], "factor_a": [0.9, 0.1]}
+        ),
+    }
     runner = StrategyRunner.from_settings(
         RunnerSettings(),
         CrossSectionalScreener({"factor_a": 1.0}),
@@ -98,8 +94,10 @@ def test_backtest_result_consistency_on_force_exit_transition(tmp_path: Path) ->
     engine = BacktestEngine.from_settings(
         BacktestSettings(),
         runner,
-        store,
         TradingCalendar(),
+        factor_source=MappingDayFrameSource(factor_by_day),
+        market_data_source=StoreMarketDataSource(store=store),
+        signal_overlay_source=NullSignalOverlaySource(),
         decision_overlays_by_day={
             date(2026, 4, 14): pl.DataFrame(
                 {

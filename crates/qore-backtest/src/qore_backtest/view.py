@@ -127,6 +127,37 @@ class BacktestPlotter:
         axes[1].set_title("Drawdown")
         return figure
 
+    def timeseries(
+        self,
+        series: pl.DataFrame,
+        *,
+        date_col: str = "date",
+        value_col: str = "value",
+        title: str = "Time Series",
+        ylabel: str | None = None,
+        label: str | None = None,
+    ) -> object:
+        import matplotlib.pyplot as plt
+
+        figure, axis = plt.subplots()
+        if (
+            date_col in series.columns
+            and value_col in series.columns
+            and not series.is_empty()
+        ):
+            plotted = series.sort(date_col)
+            axis.plot(
+                plotted.get_column(date_col).to_list(),
+                plotted.get_column(value_col).to_list(),
+                label=label,
+            )
+            if label is not None:
+                axis.legend()
+        axis.set_title(title)
+        if ylabel is not None:
+            axis.set_ylabel(ylabel)
+        return figure
+
     def tearsheet(self) -> object:
         return self.overview()
 
