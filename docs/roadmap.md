@@ -1,197 +1,233 @@
-# Qore Rewrite Roadmap
+# Qore Refactor Roadmap
 
 ## Objective
 
-Ship a library-first, architecture-clean Qore stack (`qore-*` crates) with:
+Move Qore to a signal-first architecture:
 
-- typed, frame-native runner/backtest hot paths,
-- crate-local settings (no global config coupling in crate internals),
-- simplified package boundaries before CLI unification,
-- one reproducible A-share workflow from fetch -> factor -> model -> runner -> backtest.
+- factor computation stays in `qore-factor` as reusable transforms,
+- runner and backtest consume only strategy decisions/signals,
+- workflow is composition-only and does not materialize library internals.
 
-Legacy compatibility is allowed only as thin transitional shims.
+## Non-negotiable Rules
 
-## Current Direction (Hard Constraints)
+1. No workflow-owned factor persistence.
+2. No `factor_scores` dataset in execution path.
+3. No `factor_name`-driven long-table contracts between runner/backtest.
+4. Runner/backtest interfaces must be signal-oriented (`buy`/`hold`/`sell` + sizing metadata).
+5. Strategy/workflow code must never rebuild ranking/storage semantics that belong in crates.
 
-1. Architecture-first changes are allowed to be compatibility-breaking.
-2. Keep execution/dataflow Polars-native where practical.
-3. Avoid opaque parsing in crate internals (`_safe_*`, permissive row coercion).
-4. Keep typed semantics in hot paths (dataclasses/typed frame contracts).
-5. Keep settings crate-local and exported at package root.
-6. Keep workflow/CLI layer as the only future config-unification boundary.
+## Target Architecture
 
-## Boundary Decisions
+### 1) `qore-factor`: pure composition primitives
 
-### Legacy migration inventory (merged)
+- Keep `FactorPipeline` as factor-compute/normalize/neutralize composition.
+- Remove convenience methods that pre-bake domain composition (for example liquidity-capacity builder shortcuts).
+- Keep outputs frame-native and wide by symbol/date.
 
-`docs/migration-inventory.md` is merged into this roadmap and treated as closed reference material.
+### 2) `qore-runner`: signal contract as primary output
 
-- Legacy `src/quant_trade` modules are no longer planning anchors for active architecture work.
-- Current development priority is direct `qore-*` crate evolution, not one-to-one legacy mapping.
-- Practical carry-over policy:
-  - `src/quant_trade/client/eastmoney.py` -> keep endpoint reverse-engineering only; runtime stays in `qore_data.fetcher.eastmoney`.
-  - `src/quant_trade/feature/*` -> carry formulas only when needed by active factor workflow.
-  - `src/quant_trade/model/*` -> carry concepts only; implementation authority stays in `qore_intelligence`.
-  - Non-essential legacy scripts/transforms/config adapters stay retired unless required by the new workflow boundary.
+- Standardize runner output to typed decision frames:
+  - `date`, `symbol`, `signal`, `weight_target`, optional `reason`.
+- Ranking/cutoff ownership stays in runner strategy internals.
+- No public contract requiring concrete factor labels.
 
-Legacy build order notes are superseded by active workstreams and priority checklists in this document.
+### 2.1) `qore-runner.runner` concrete refactor scope
 
-### Calendar ownership
+- Keep runner contracts factor-agnostic:
+  - no `factor_name` field, no factor label dispatch, no long-table factor assumptions.
+- Keep runner hot path frame-native:
+  - no Python list/materialized object loops in selection/weight/decision delta flow.
+- Keep source and strategy behavior protocol-dispatched:
+  - runner consumes `Strategy.generate(...)` and provider frames via protocol, not hardcoded dataset logic.
+- Unify runner outputs into one canonical decision-signal DataFrame contract:
+  - required columns: `date`, `symbol`, `signal`, `weight_target`, `weight_current`, `weight_delta`.
+  - optional columns: `reason`, `score_value`, strategy metadata.
+- Avoid double representations in runner API:
+  - no parallel object + frame semantics for the same decision state.
 
-- `qore_runner.calendar.TradingCalendar`: single runtime calendar owner.
-- `qore_backtest`: consumes runner calendar directly; no crate-local duplicate.
-- `qore_core.calendar`: removed as part of `qore-core` runtime-surface merge-down.
+### 3) `qore-backtest`: execute decisions, not factors
 
-Policy: retain exactly one calendar module (`qore_runner.calendar`) during this phase.
+- Backtest engine accepts runner decisions directly.
+- Remove reliance on long-form factor score tables.
+- Keep provider/store access focused on market/execution data, not factor-name dispatch.
 
-### Settings ownership
+### 3.1) `qore-backtest.engine` hard cleanup requirements
 
-- `BacktestSettings`, `RunnerSettings`, `DataSettings`, `IntelligenceSettings` now live in each package `__init__.py`.
-- Legacy `settings.py` modules are removed.
-- Internal and user imports should use package-root settings symbols.
+- No pre-baked internal dataset reads in engine runtime paths (for example market/news/factor table assumptions).
+- All runtime data sources must be constructor-injected contracts.
+- `BacktestEngine` must not own `QoreStore`; storage access belongs to externally provided sources.
+- Source protocols must dispatch by behavior/capability, not by hardcoded source names or dataset labels.
+- Remove all `factor_name`-style materialization/pivot compatibility from engine.
+- Remove helper-style transformation layers that convert object -> frame repeatedly in hot paths.
+- Keep run loop frame-native end-to-end (request/plan/fill/diagnostics as DataFrame operations).
+- Keep `_empty_*` shapes owned by `BacktestRunState.initialize(...)` only.
+- Keep diagnostics schema ownership co-located in `BacktestRunState.initialize(...)`.
+- Replace summary object-to-frame adapter patterns with direct DataFrame summary records.
 
-## What Is Done
+### 3.2) `qore-backtest.engine` concrete refactor scope
 
-- Backtest typed refactor baseline landed:
-  - typed execution structures (`SymbolExecutionSpec`, typed fill/market rows),
-  - reduced dict/list row plumbing in active execution path,
-  - session/dataset routing pre-bound in execution specs,
-  - typed cadence scaffold (`daily`/`intraday`) on `BacktestSettings`.
-- Runner selection/sizing path tightened toward frame-native joins.
-- Runner/backtest efficiency slice landed:
-  - `TargetPortfolio` now carries `weights_frame` as canonical runner output (dict weights removed),
-  - backtest fill-request planning now joins target/current weight frames directly (no per-step dict->frame rebuild),
-  - fill execution no longer materializes typed row dataclass lists before simulation,
-  - execution metadata planning moved to frame-native expression pipeline instead of row-wise Python spec reconstruction.
-- Runner sizing contracts are now frame-native end to end:
-  - `PositionSizer.size` and `PositionSizer.cap` operate on `pl.DataFrame` weights,
-  - `StrategyRunner.step` no longer accepts dict-based current weights.
-- `Universe` ownership migration started:
-  - `Universe` contract is now merged into `qore_data.universe` (no split `universe_contract` module),
-  - `qore-data` package root exports `Universe`, reducing direct runtime dependence on `qore_core.universe`,
-  - runner strategy session typing now imports `TradingSession` from `qore_data.universe` instead of `qore_core.instrument`.
-- `qore-core` universe surface removed:
-  - `qore_core.universe` module deleted,
-  - `Universe` usage is now owned by `qore-data`.
-- `Instrument` ownership migration started:
-  - `qore_data.instrument` now owns `StockInstrument`/`FundInstrument`/`DerivativeInstrument` + `TradingSession`,
-  - `qore-data` fetch/source/eastmoney runtime imports no longer depend on `qore_core.instrument`.
-- `qore-core` dependency edges reduced:
-  - `qore-data`, `qore-factor`, `qore-runner`, `qore-intelligence`, and `qore-backtest` no longer declare `qore-core` package dependency.
-- `qore-core` removal completed in workspace code:
-  - `crates/qore-core` source/tests/package metadata removed,
-  - workspace source mapping for `qore-core` removed.
-- Backtest run-state initialization is now method-owned (`BacktestRunState.initialize(...)`) instead of inline empty-frame construction in the engine loop.
-- Session/dataset restrictions for execution planning are now owned by `Universe.execution_metadata()`; backtest engine consumes precomputed metadata.
-- Backtest run-state moved further toward columnar storage:
-  - day fills are accumulated as frame rows (`fills_frame`) and returned as DataFrame in `BacktestResult`.
-- Universe API cleanup landed:
-  - removed legacy `to_universe` / `to_universe_frame` compatibility methods,
-  - canonical universe output is frame-first (`universe_frame(...)` + explicit `Universe.from_frame(...)` where needed).
-- Snapshot argument model normalized:
-  - `StockSnapshotSpec` now dispatches through a single typed `SnapshotQuery` input.
-- Fundamentals retrieval extended:
-  - selection scope now supports fundamentals date windows (`fundamentals_start`, `fundamentals_end`) and no longer hard-codes latest-only helper wrappers.
-- Universe helper naming and API simplification completed:
-  - removed `*_lazy` helper naming in universe internals,
-  - removed duplicate `candidate_universe_frame(...)` surface and kept canonical `universe_frame(...)`.
-- Backtest execution-plan guardrails + parity coverage landed:
-  - execution planning now rejects symbols with missing/invalid execution session metadata,
-  - daily fill-delay parity tests cover auction/nav/continuous session behavior.
-- Backtest integration consistency coverage improved:
-  - force-exit transition flow now validates cross-artifact consistency (`diagnostics`, `fills`, `turnovers`, `positions`, `nav`) in one compact integration test.
-- Backtest diagnostics/result assembly is now frame-native end-to-end:
-  - removed per-day `BacktestDiagnosticsRow` object materialization in engine assembly,
-  - `BacktestResult` now returns positions/turnover as DataFrames (no dict/list reconstruction).
-- Fill execution row assembly reduced further:
-  - `_fills_from_frame(...)` no longer builds intermediate dict-record frames before final schema assembly,
-  - fill output now materializes directly into final typed DataFrame columns.
-- Crate-local settings migration completed for data/intelligence/runner/backtest package roots.
-- Backtest visualization kickoff landed:
-  - `BacktestResult.view()` + frame-native `BacktestView` landed,
-  - `window(...)`, `with_drawdown(...)`, and `with_benchmark(...)` fluent view methods landed,
-  - `plot()` facade landed with backend managed via uv dependency group (`viz`).
-- Documentation split by audience landed:
-  - `docs/introduction.md` now merges user intro + config + basic workflow usage,
-  - `docs/workflow.md` is contributor-focused with crate-level extension guidance.
-- Universe convenience API improved:
-  - `StockSelectionPipeline.universe(...)` and `StockUniverseQuery.universe()` now return `Universe` directly,
-  - users no longer need to manually wrap `universe_frame(...)` for common flows.
+- Engine must not own implicit IO policy:
+  - market/factor/overlay data acquisition must come from injected protocols only.
+  - engine may cache frames, but must not decide dataset names/columns internally.
+  - engine must not depend on `QoreStore` in type signature or construction path.
+- Engine must reject factor-label style payloads:
+  - any `factor_name` long-form contract is invalid in execution path.
+  - accepted factor input is wide frame keyed by `symbol` (+ optional `date`).
+- Engine execution should stay in DataFrame pipeline form:
+  - request -> execution plan -> fills -> turnover -> diagnostics all expressed as frame transforms.
+  - `list[Fill]`/tuple-row adaptation loops are forbidden in core path.
+- Engine summary should be frame-first:
+  - daily summary emitted directly as one-row DataFrame contract.
+  - diagnostics schema co-located with summary contract.
+- Source abstraction should be unified:
+  - avoid repeated protocol variants that differ only by transport (`db` vs `dataframe`) while doing same behavior.
+  - define one behavioral protocol per responsibility (factor, market, overlay) with shared frame contract.
 
-## Active Workstreams
+### 4) `qore-data`: remove factor-score schema coupling
 
-### 1) Runner and backtest typed contracts
+- Deprecate and remove `factor_scores` from canonical store schema.
+- Keep universe/profile/fundamental/market datasets as selection inputs.
+- If derived snapshots are needed, store strategy decision artifacts instead of factor-name rows.
 
-- Remove residual object-typed row parsing from hot loops.
-- Keep strategy/backtest contracts centered on semantic frames.
-- Add architecture tests for typed contracts and session/dataset consistency.
-- Continue eliminating remaining Python list/set-heavy branching where frame-native joins/aggregations can express the same logic.
+### 4.1) `qore-intelligence` alignment
 
-### 2) Config and package-boundary simplification
+- Remove `factor_name` + long-table training/serving assumptions from intelligence workflows.
+- Training/inference inputs must consume wide symbol/date signal frames.
+- Model workflow should not require `factor_scores` pivots as canonical path.
 
-- Keep crate APIs free of `QoreConfig` requirements.
-- Restrict any `QoreConfig` adapters to workflow/example composition boundaries.
-- Continue shrinking `qore-core` to compatibility-only exports.
-- Move remaining `qore_core` runtime contracts (`instrument`, `universe`) behind crate-local owners and keep only temporary shims.
-- `qore-core` is no longer an active crate; config ownership is moved to workflow-local typed config structures.
+### 5) `small_cap_strategy`: composition-only example
 
-### 3) Backtest realism and diagnostics
+- No `WorkflowConfig` wrapper dataclass; accept crate `*Settings` objects directly.
+- No writing/reading `factor_scores`.
+- Use crate APIs only (selection -> runner -> backtest -> view).
 
-- Improve pending fill/retry behavior and execution diagnostics.
-- Keep deterministic ordering with optional parallel batch fill boundaries.
+## Implementation Order
 
-### 4) Optional visualization support
+1. Remove factor-score APIs from `qore-factor` and workflow usage.
+2. Introduce/complete signal decision contract in runner.
+3. Refactor `qore-runner.runner` to a single frame-native decision-signal contract and remove parallel object/frame decision semantics.
+4. Refactor `qore-backtest.engine` to protocol-injected sources and fully frame-native execution/fill/summary path.
+5. Remove `factor_name`/`factor_scores` coupling from `qore-intelligence` model workflow.
+6. Remove remaining `factor_scores` schema dependencies in data paths.
+7. Final cleanup of small-cap example to only wire library methods.
 
-- API kickoff landed per proposal (`BacktestView` + `BacktestResult.view()` + guarded `plot()` facade).
-- Keep base install dependency-free; keep plotting runtime dependency behind uv dependency group (`viz`).
-- Initial proposal artifact remains at `docs/backtest-visualization-proposal.md`.
+## Current Findings (No-Code Proposal Snapshot)
 
-Proposed pipe-style API (no implementation yet):
+- `qore-backtest.engine` still contains helper-heavy flow and implicit source assumptions; this conflicts with source-injection and composition-only goals.
+- `qore-backtest.engine` still has object-frame dual representations in fill/summary paths; this should be collapsed to one DataFrame-native contract.
+- `qore-intelligence` model workflow still required store-level long-frame compatibility; this should be replaced with wide-frame dataset ingestion.
+- source contracts in `engine.py` are still repetitive (`db`/`provider` wrappers with same runtime behavior) and not yet unified by capability.
 
-- Add a typed view model container, e.g. `BacktestView`:
-  - `nav: pl.DataFrame`
-  - `drawdown: pl.DataFrame | None`
-  - `benchmarks: dict[str, pl.DataFrame]`
-  - `trades: pl.DataFrame | None`
-  - `diagnostics: pl.DataFrame | None`
-- Expose fluent, method-owned pipeline style from `BacktestResult`:
-  - `result.view().with_drawdown().with_benchmark("CSI300", bench_df).plot().equity()`
-  - `result.view().window(start=..., end=...).plot().overview()`
-- Keep plotting entrypoints behind objects (`.plot().equity()`, `.plot().tearsheet()`), not free helper functions.
-- Keep base install dependency-free; activate plotting via uv dependency group only.
+## Progress Snapshot
 
-## Priority Checklist
+- `qore-backtest.engine` now consumes injected market + signal-overlay sources (no hardcoded `news_scores` read path).
+- `qore-backtest.engine` fill resolution path is now frame-native and removed row-wise fill object materialization loops in core execution.
+- factor long-form guardrail is enforced in backtest execution (`factor_name` long-frame rejected).
+- `small_cap_strategy` now injects factor source explicitly into backtest engine.
+- `BacktestDaySummary` object-first daily assembly has been removed from run-loop usage; daily diagnostics are emitted directly as one-row DataFrame records.
+- backtest-side factor column patching compatibility has been removed; runner now validates required factor columns and fails fast on invalid factor frames.
+- `BacktestEngine` no longer owns `QoreStore`; factor/market/overlay IO dependencies are now supplied via injected source providers.
+- store-backed sources now encapsulate storage dependency internally (`StoreFactorSource`, `StoreMarketDataSource`, `StoreSignalOverlaySource`) while engine stays storage-agnostic.
+- `_factor_frame_for_day` no longer performs explicit schema-guard checks for required columns; contract validation stays in runner.
+- repeated source-frame materialization behavior in `*_for_day` methods has been consolidated via a shared materialization helper.
+- `qore-intelligence` no longer exposes store-coalescing workflow helpers; wide training frames are composed explicitly in workflow code (`store.read(...).select(...).join(...)`) then passed to `ModelPipeline.fit` and `ModelRegistry.save`.
+- Remaining major slices:
+  - unify remaining repetitive source protocol surface into slimmer capability-oriented adapters,
+  - remove remaining `factor_scores` schema coupling in data/store paths.
 
-### P0 - Stability after boundary cleanup
+## State Update (WP-B / WP-A)
 
-- [x] Validate no runtime imports still require removed `settings.py` modules.
-- [x] Run lint/compile checks on touched crates.
-- [x] Keep package root exports stable for user imports.
+- `WP-B` status: **partial**.
+  - Done: source injection direction and frame-native fill path in core.
+  - Done: summary emit is frame-first in run loop.
+  - Done: engine storage dependency removed (`QoreStore` no longer in engine constructor/state).
+  - Not done: final engine helper minimization pass and source-surface consolidation.
+- `WP-A` status: **partial**.
+  - Done: runner exposes decision signal frame.
+  - Done: factor-frame required-column contract validation moved to runner.
+  - Not done: final contract documentation + intelligence-side alignment.
+- `WP-C` status: **complete**.
+  - Done: removed canonical `factor_scores`/`factor_name` pivot dependency from intelligence model workflow store ingestion path.
+  - Done: moved workflow inputs to wide-frame contract (`factor_columns`, `factor_dataset`).
+  - Done: removed coalesced fit/save workflow helpers in favor of explicit composition through model pipeline + registry.
 
-### P1 - Backtest engine completion
+## Proposed Refactor Plan (No Code Yet)
 
-- [x] Finish typed/columnar result assembly paths.
-- [x] Add parity tests for daily cadence before/after planner refinements.
-- [x] Add guardrails against session inference from runtime market rows.
+0. boundary reset (first action):
+   - declare hard ownership: strategy/runner own factor contract validity; backtest only executes provided frames.
+   - remove all backtest-side compatibility behavior for missing factor columns and shape patching.
+1. `runner` contract freeze:
+   - define canonical decision-signal frame schema and document required/optional columns.
+   - ensure selection and sizing metadata are emitted only as frame columns.
+2. `runner` execution simplification:
+   - remove any duplicated decision state that is not required by downstream contracts.
+   - preserve diagnostics as frame-derived metrics, not object-derived counters.
+3. `engine` source injection finalization:
+   - define one behavioral protocol per responsibility (factor/market/overlay) with shared frame-return contract.
+   - remove transport-specific duplication (`db` vs dataframe wrappers with same behavior).
+   - remove internal pre-baked source read paths from engine runtime.
+   - remove `QoreStore` from `BacktestEngine`; sources receive dependencies externally at composition time.
+4. `engine` fill path vectorization:
+   - replace row-wise fill conversion helpers with frame-native fill preparation and status derivation.
+   - keep delay/session routing as frame transformations only.
+5. `engine` summary/diagnostics frame-first rewrite:
+   - remove `BacktestDaySummary` object-first usage in run loop.
+   - write daily summary directly as DataFrame row(s) in run path.
+   - append diagnostics from same summary frame contract without object->frame adapters.
+6. `engine` helper minimization:
+   - remove `engine` helpers that perform strategy-role compatibility (`normalize factor source`, `ensure factor exists` style behavior).
+   - keep only execution-role helpers (execution plan, forced liquidation, return aggregation) and protocol boundary helpers.
+   - keep empty schemas only in `BacktestRunState.initialize(...)`.
+   - remove source-name-oriented helper/wrapper code; retain only capability-oriented protocol adapters.
+7. `qore-intelligence` wide-frame migration:
+   - replace factor-label dependent model IO with wide frame contracts.
+8. parity + regression sweep:
+   - compare nav/positions/turnover/diagnostics parity versus baseline scenarios.
+   - add explicit tests asserting no `factor_name`/`factor_scores` dependency in runner/backtest intelligence paths.
 
-### P2 - Runner contract simplification
+## Engine/Runner Work Packages (Concrete)
 
-- [x] Keep one canonical decision frame (`selected`, `exclude_reason`, timing fields).
-- [x] Reduce remaining helper indirection in decision/sizing flows.
+### WP-A: Runner Contract Package (`qore-runner/src/qore_runner/runner.py`)
 
-### P3 - Workflow and operator path
+- Goal: one canonical frame contract from strategy decision to execution.
+- Deliverables:
+  - documented `decision_signals` schema and invariants.
+  - no factor-label coupling in runner API.
+  - diagnostics derived from frame state only.
+- Verification:
+  - runner flow tests pass with selection, overlay, rebalance cache, drawdown guard.
+  - no new list/object-based hot path transformations.
 
-- [x] Document one supported reproducible A-share runbook.
-- [ ] Define CLI/entrypoint contract after crate boundaries stabilize.
+### WP-B: Engine Source/Execution Package (`qore-backtest/src/qore_backtest/engine.py`)
 
-## Acceptance Gates
+- Goal: protocol-injected sources and frame-only execution path.
+- Deliverables:
+  - zero pre-baked source assumptions in runtime.
+  - no `QoreStore` dependency in `BacktestEngine`.
+  - unified source protocols by behavior (factor/market/overlay), no transport-duplicated interfaces.
+  - no factor materialization compatibility (`factor_name` long form unsupported).
+  - frame-native fill and summary pipelines.
+  - no strategy-role compatibility logic in engine (`normalize_factor_source_frame`/`ensure_required_factor_columns` style behavior removed).
+- Verification:
+  - backtest flow parity on nav/positions/turnover/diagnostics.
+  - tests cover missing/invalid injected source data and protocol guardrails.
+  - tests assert backtest fails fast on invalid factor frames instead of patching/filling missing factor columns.
+  - tests assert engine construction/execution does not require store handle.
 
-The roadmap slice is complete when:
+### WP-B1: Immediate Next Slice (Plan First)
 
-- active crate APIs compose with crate-local settings only,
-- runner/backtest hot paths are typed and frame-native (no opaque row parsing),
-- only one runtime calendar module remains (`qore_runner.calendar`),
-- visualization scope is approved in roadmap before any plotting/runtime dependency changes,
-- `qore-core` is removed from active workspace runtime and dependency graph,
-- one end-to-end A-share workflow remains reproducible on supported entrypoints,
-- crate deliverables remain library-first (no product CLI entrypoint embedded in crates).
+- Remove `BacktestDaySummary` object-centric row assembly from run path and switch to direct one-row DataFrame summary emit.
+- Remove backtest-side factor fallback/compatibility helpers entirely; delegate contract strictness to strategy/runner.
+- Keep engine strict: if factor input does not satisfy strategy-required columns, fail fast at boundary (no padding/default fill in engine).
+- Remove `QoreStore` from `BacktestEngine` constructor and `from_settings` path.
+- Collapse repetitive source wrappers into capability-based protocol adapters.
+- Verify with focused parity tests (`test_backtest_flow.py`, `test_backtest_consistency.py`, `test_runner_flow.py`) and add one explicit boundary-failure test.
+
+### WP-C: Intelligence Contract Package (`crates/qore-intelligence`)
+
+- Goal: remove factor-label dependency from training/inference interfaces.
+- Deliverables:
+  - wide signal frame training/inference inputs.
+  - no canonical dependence on `factor_scores`/pivot logic.
+- Verification:
+  - model workflow tests pass with wide-frame fixtures only.

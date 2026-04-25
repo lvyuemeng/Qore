@@ -22,6 +22,8 @@ crate packages; put runnable examples under `examples/`.
 - Keep crate internals on crate-local typed settings.
 - Keep `QoreConfig` adapters in composition code only.
 - Maintain deterministic strategy/backtest behavior.
+- Avoid helper APIs that coalesce multiple pipeline stages into a single opaque call;
+  compose explicit steps at workflow boundary.
 
 ## Concrete extension recipes
 
@@ -108,6 +110,19 @@ Rules:
 - extend `BacktestView` methods as pure-return transforms
 - keep plotting behind method-owned facade (`result.view().plot().equity()`)
 - keep plotting dependency in uv dependency group `viz`
+
+### 6) Extend intelligence model workflow
+
+Primary files:
+
+- `crates/qore-intelligence/src/qore_intelligence/model/pipeline.py`
+- `crates/qore-intelligence/src/qore_intelligence/model/registry.py`
+
+Rules:
+
+- keep training/inference inputs as wide frames (`date`, `symbol`, factor columns)
+- do not add pipe-coalesced helpers such as `fit_and_save_*`; keep fit/save as explicit composition
+- keep store ingestion helper focused on frame assembly only (no model fit/registry side effects)
 
 ## Tests to add with each feature
 
