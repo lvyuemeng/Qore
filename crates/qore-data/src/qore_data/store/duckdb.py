@@ -199,13 +199,30 @@ class QoreStore:
         )
         if output.is_empty():
             return
-        root = self._partition_root(dataset, output, dataset_info.partition_cols)
-        root.mkdir(parents=True, exist_ok=True)
-        file_path = (
-            root / f"part-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}.parquet"
-        )
-        pq.write_table(output.to_arrow(), file_path)
+        self._write_partitions(dataset, output, dataset_info.partition_cols)
         self.register_all_views()
+
+    def _write_partitions(
+        self, dataset: str, df: pl.DataFrame, partition_cols: list[str]
+    ) -> None:
+        if not partition_cols:
+            root = self._dataset_root(dataset)
+            root.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+            pq.write_table(df.to_arrow(), root / f"part-{ts}.parquet")
+            return
+        first_col = partition_cols[0]
+        rest_cols = partition_cols[1:]
+        parts = df.partition_by(first_col)
+        for group in parts:
+            value = group.get_column(first_col).to_list()[0]
+            leaf = self._dataset_root(dataset) / f"{first_col}={value}"
+            if rest_cols:
+                self._write_partitions(dataset, group, rest_cols)
+            else:
+                leaf.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+                pq.write_table(group.to_arrow(), leaf / f"part-{ts}.parquet")
 
     def sql(self, query: str) -> pl.LazyFrame:
         relation = self._conn.sql(query)
@@ -243,20 +260,6 @@ class QoreStore:
             column for column in output.columns if column not in expected_columns
         ]
         return output.with_columns(cast_exprs).select([*expected_columns, *passthrough])
-
-    def _partition_root(
-        self,
-        dataset: str,
-        df: pl.DataFrame,
-        partition_cols: list[str],
-    ) -> Path:
-        root = self._dataset_root(dataset)
-        for column in partition_cols:
-            if column not in df.columns or df.is_empty():
-                continue
-            value = df.get_column(column).to_list()[0]
-            root = root / f"{column}={value}"
-        return root
 
     def _cast_expr(self, name: str, data_type: pa.DataType) -> pl.Expr:
         return pl.col(name).cast(_polars_type(data_type), strict=False)
