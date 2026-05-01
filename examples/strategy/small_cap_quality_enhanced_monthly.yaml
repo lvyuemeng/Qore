@@ -3,7 +3,7 @@ strategy:
   label: 小市值质量增强月频轮动策略
   version: 1.0
   market_scope:
-    benchmark: 8841431.WI
+    benchmark: 000852.SH
     capital_profile:
       type: medium_small
       suggested_max_aum_cny: 50000000

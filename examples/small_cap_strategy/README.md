@@ -1,45 +1,29 @@
 # Small-Cap Strategy Example
 
-This example is the current end-to-end small-cap workflow built on Qore crates.
-It runs selection -> runner decisions -> backtest execution without reading or
-writing `factor_scores`.
+End-to-end small-cap workflow built on Qore crates.
+Runs data preparation → selection → runner decisions → backtest execution.
 
-## What the current workflow does
+## Prerequisites
 
-The workflow is implemented in `examples/small_cap_strategy/src/small_cap_strategy/workflow.py`.
+- Python 3.13 with `uv` workspace
+- Local DuckDB + Parquet store populated with required datasets
 
-1. Builds a fixed strategy spec in code (`_strategy_spec`) with:
-   - benchmark index: `8841431.WI`
-   - rebalance: monthly (`buy_delay=1`, `sell_delay=2`)
-   - selection filters: `roe`, debt-to-asset ratio, operating cashflow, `pe_ttm`, `pb`
-   - ranking key: `total_market_cap` ascending (smaller cap preferred)
-2. Computes monthly rebalance dates with `RebalanceSchedule.schedule(...)` using
-   `TradingCalendar` trading days.
-3. For each rebalance date, builds selection inputs from `qore-data`:
-   - `build_selection_inputs_for_as_of(...)`
-   - `build_candidate_selection_snapshot(...)`
-4. Adds factor transform in pipeline composition:
-   - `FactorPipeline().add(DebtToAssetRatioFactor(...)).run(...)`
-5. Produces two date-keyed frames for execution:
-   - `factor_frame`: `date`, `symbol`, `total_market_cap`
-   - `overlay_frame`: `date`, `symbol`, `selected`, `exclude_reason`
-6. Runs `StrategyRunner` + `BacktestEngine`:
-   - runner: `CrossSectionalScreener` + `EqualWeightSizer`
-   - backtest inputs: `DateColumnDayFrameSource` for factor/decision overlay,
-     `StoreMarketDataSource` for market prices.
+Prepare data first:
 
-## Can it run directly right now?
+```bash
+uv run --package small-cap-strategy small-cap-strategy --prepare-data
+```
 
-Yes, the code path is runnable directly as a CLI, but only if the required local
-datasets are present in your DuckDB/Parquet store.
+This fetches index constituents, profiles, daily OHLCV, fundamentals, audit opinions,
+analyst forecasts, and announcements for the benchmark index constituents.
 
-Run command:
+## Run
 
 ```bash
 uv run --package small-cap-strategy small-cap-strategy
 ```
 
-Optional runtime args:
+Optional args:
 
 ```bash
 uv run --package small-cap-strategy small-cap-strategy \
@@ -51,41 +35,30 @@ uv run --package small-cap-strategy small-cap-strategy \
   --drawdown-stop 0.15
 ```
 
-## Data retrieval consistency and required datasets
+## Required Datasets
 
-Current retrieval is consistent with workflow logic and crate APIs. The workflow
-constructs all selection inputs from store reads in `qore-data` and executes
-trades from `qore-backtest` market reads.
-
-At minimum, you need:
-
-- `index_constituents` (for benchmark membership at each rebalance `as_of`)
-- `stock_profiles` (market cap, board, listing date, ST flag)
-- `stock_ohlcv` (status flags and execution prices)
-- `fundamentals` (for `roe`, `pe_ttm`, `pb`, `operating_cashflow`, liabilities/assets)
-- `strategy_factors` (liquidity/capacity columns such as
-  `avg_amount_20d`, `min_amount_20d`, `position_to_amount_20d_ratio`)
-- `stock_audit_opinions` (for audit-based exclusion state)
-
-The helper `build_stock_category_report(...)` also uses:
-
-- `analyst_forecasts`
-- `announcements`
-
-## Practical status of this example
-
-- The workflow is executable and internally consistent for current contracts.
-- It is not a zero-data demo; it depends on pre-populated local datasets.
-- The real-data contract test (`examples/small_cap_strategy/tests/test_small_cap.py`)
-  explicitly skips when required datasets are missing, and runs assertions only
-  when local data is available.
+| Dataset | Used for |
+|---|---|
+| `index_constituents` | Benchmark membership |
+| `stock_profiles` | Market cap, board, listing date, ST flag |
+| `stock_ohlcv` | Trading status, execution prices |
+| `fundamentals` | roe, pe_ttm, pb, operating_cashflow, total_assets, total_liabilities |
+| `strategy_factors` | avg_amount_20d, min_amount_20d, position_to_amount_20d_ratio |
+| `stock_audit_opinions` | Audit-based exclusion |
+| `analyst_forecasts` | Category report |
+| `announcements` | Category report |
 
 ## Output
 
-Running the CLI prints:
-
-- stock category report frame
+- Stock category report (industry × board with counts, market cap, forecasts, announcements)
 - NAV frame
-- diagnostics frame
+- Diagnostics frame
+- Backtest overview plot (NAV + drawdown)
 
-Then it renders backtest overview plots via `result.view().with_drawdown().plot().overview()`.
+## Troubleshooting
+
+**"No rebalance selection snapshots"** — data is prepared but no candidates pass the selection filters. Verify filters still admit candidates for the configured date range.
+
+**"No universe data found"** — prepare data first with `--prepare-data`.
+
+**Test skips as "required datasets missing"** — the real-data contract test requires a populated store. Run `--prepare-data` or set `QORE_RUN_LIVE_IO=1` for live IO tests.
