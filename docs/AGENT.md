@@ -10,6 +10,19 @@ This repository is the `Qore` rewrite workspace.
 - Use `singledispatch` for instrument-specific behavior; do not add `isinstance` routing.
 - Prefer crate-local typed config structures; do not introduce new cross-crate `QoreConfig` coupling.
 - Construct dependencies from each crate's own config type; unify config surfaces only at workflow/CLI entry layers.
+- Keep orchestration contracts explicit and typed:
+  - separate run settings from data/job semantics,
+  - avoid opaque types such as `object` and `dict[str, object]`,
+  - prefer explicit stage IO dataclasses or frame contracts over generic state bags.
+- Keep pipeline/reporting flow frame-first:
+  - emit manifest/report rows as DataFrames directly,
+  - avoid Python row-list accumulation when a DataFrame contract is the real boundary.
+- Encapsulate effects behind named stage operations:
+  - do not leak ad-hoc fetch/store/build transitions into top-level run loops,
+  - avoid helper stacks that hide orchestration shape without improving clarity.
+- Delegate domain formulas to the owning crate:
+  - `qore-data` orchestrates fetch/store/build,
+  - `qore-factor` owns factor column production and related schema semantics.
 
 ## Principle
 
