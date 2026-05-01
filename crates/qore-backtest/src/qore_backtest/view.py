@@ -13,9 +13,10 @@ class BacktestView:
     benchmarks: dict[str, pl.DataFrame] = field(default_factory=dict)
     trades: pl.DataFrame | None = None
     diagnostics: pl.DataFrame | None = None
+    _nav_sorted: pl.DataFrame | None = None
 
     def with_drawdown(self) -> BacktestView:
-        if self.nav.is_empty() or not {"date", "nav"}.issubset(self.nav.columns):
+        if self.nav.is_empty() or "nav" not in self.nav.columns:
             empty = pl.DataFrame(schema={"date": pl.Date, "drawdown": pl.Float64})
             return BacktestView(
                 nav=self.nav,
@@ -24,74 +25,98 @@ class BacktestView:
                 trades=self.trades,
                 diagnostics=self.diagnostics,
             )
-        drawdown = pl.DataFrame(
-            self.nav.lazy()
-            .select(
-                pl.col("date").cast(pl.Date, strict=False),
-                (
-                    pl.col("nav").cast(pl.Float64, strict=False)
-                    / pl.col("nav").cast(pl.Float64, strict=False).cum_max()
-                    - 1.0
-                ).alias("drawdown"),
-            )
-            .collect()
+        sorted_nav = self.nav.sort("date")
+        dd = pl.DataFrame(
+            {
+                "date": sorted_nav.get_column("date"),
+                "drawdown": sorted_nav.get_column("nav")
+                / sorted_nav.get_column("nav").cum_max()
+                - 1.0,
+            }
         )
         return BacktestView(
             nav=self.nav,
-            drawdown=drawdown,
+            drawdown=dd,
             benchmarks=self.benchmarks,
             trades=self.trades,
             diagnostics=self.diagnostics,
+            _nav_sorted=sorted_nav,
         )
 
     def with_benchmark(self, name: str, benchmark_nav: pl.DataFrame) -> BacktestView:
-        normalized = pl.DataFrame(
+        bm = pl.DataFrame(
             benchmark_nav.lazy()
-            .select(
-                pl.col("date").cast(pl.Date, strict=False),
-                pl.col("nav").cast(pl.Float64, strict=False),
-            )
+            .select(pl.col("date").cast(pl.Date), pl.col("nav").cast(pl.Float64))
             .filter(pl.col("date").is_not_null())
             .sort("date")
             .collect()
         )
-        benchmarks = dict(self.benchmarks)
-        benchmarks[name] = normalized
+        bm_copy = dict(self.benchmarks)
+        bm_copy[name] = bm
         return BacktestView(
             nav=self.nav,
             drawdown=self.drawdown,
-            benchmarks=benchmarks,
+            benchmarks=bm_copy,
             trades=self.trades,
             diagnostics=self.diagnostics,
+            _nav_sorted=self._nav_sorted,
         )
 
     def window(
         self, start: date | None = None, end: date | None = None
     ) -> BacktestView:
         return BacktestView(
-            nav=_window_frame(self.nav, start=start, end=end),
-            drawdown=_window_optional_frame(self.drawdown, start=start, end=end),
-            benchmarks={
-                name: _window_frame(frame, start=start, end=end)
-                for name, frame in self.benchmarks.items()
-            },
-            trades=_window_optional_frame(self.trades, start=start, end=end),
-            diagnostics=_window_optional_frame(self.diagnostics, start=start, end=end),
+            nav=_window(self.nav, start, end),
+            drawdown=_window(self.drawdown, start, end)
+            if self.drawdown is not None
+            else None,
+            benchmarks={n: _window(f, start, end) for n, f in self.benchmarks.items()},
+            trades=_window(self.trades, start, end)
+            if self.trades is not None
+            else None,
+            diagnostics=_window(self.diagnostics, start, end)
+            if self.diagnostics is not None
+            else None,
+            _nav_sorted=None,
         )
 
     def plot(self) -> BacktestPlotter:
         return BacktestPlotter(self)
 
 
+def _window(frame: pl.DataFrame, start: date | None, end: date | None) -> pl.DataFrame:
+    if frame.is_empty() or "date" not in frame.columns:
+        return frame
+    preds = [
+        p
+        for p in (
+            pl.col("date") >= pl.lit(start).cast(pl.Date) if start else None,
+            pl.col("date") <= pl.lit(end).cast(pl.Date) if end else None,
+        )
+        if p is not None
+    ]
+    return (
+        pl.DataFrame(frame.lazy().filter(pl.all_horizontal(preds)).collect())
+        if preds
+        else frame
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class BacktestPlotter:
     view: BacktestView
+
+    def _nav_sorted(self) -> pl.DataFrame:
+        sorted_nav = self.view._nav_sorted
+        if sorted_nav is not None:
+            return sorted_nav
+        return self.view.nav.sort("date")
 
     def equity(self) -> object:
         import matplotlib.pyplot as plt
 
         figure, axis = plt.subplots()
-        nav = self.view.nav.sort("date")
+        nav = self._nav_sorted()
         axis.plot(
             nav.get_column("date").to_list(),
             nav.get_column("nav").to_list(),
@@ -111,15 +136,13 @@ class BacktestPlotter:
     def overview(self) -> object:
         import matplotlib.pyplot as plt
 
+        bv = self.view.with_drawdown()
         figure, axes = plt.subplots(2, 1, sharex=True)
-        nav = self.view.nav.sort("date")
+        nav = bv._nav_sorted() if bv._nav_sorted is not None else bv.nav.sort("date")
         axes[0].plot(nav.get_column("date").to_list(), nav.get_column("nav").to_list())
         axes[0].set_title("Equity")
-        drawdown = self.view.drawdown
-        if drawdown is None:
-            drawdown = self.view.with_drawdown().drawdown
-        if drawdown is not None and not drawdown.is_empty():
-            series = drawdown.sort("date")
+        if bv.drawdown is not None and not bv.drawdown.is_empty():
+            series = bv.drawdown.sort("date")
             axes[1].plot(
                 series.get_column("date").to_list(),
                 series.get_column("drawdown").to_list(),
@@ -157,35 +180,3 @@ class BacktestPlotter:
         if ylabel is not None:
             axis.set_ylabel(ylabel)
         return figure
-
-    def tearsheet(self) -> object:
-        return self.overview()
-
-
-def _window_frame(
-    frame: pl.DataFrame, *, start: date | None, end: date | None
-) -> pl.DataFrame:
-    if frame.is_empty() or "date" not in frame.columns:
-        return frame
-    predicates: list[pl.Expr] = []
-    if start is not None:
-        predicates.append(pl.col("date") >= pl.lit(start).cast(pl.Date))
-    if end is not None:
-        predicates.append(pl.col("date") <= pl.lit(end).cast(pl.Date))
-    if not predicates:
-        return frame
-    predicate = predicates[0]
-    for next_predicate in predicates[1:]:
-        predicate = predicate & next_predicate
-    return pl.DataFrame(frame.lazy().filter(predicate).collect())
-
-
-def _window_optional_frame(
-    frame: pl.DataFrame | None,
-    *,
-    start: date | None,
-    end: date | None,
-) -> pl.DataFrame | None:
-    if frame is None:
-        return None
-    return _window_frame(frame, start=start, end=end)

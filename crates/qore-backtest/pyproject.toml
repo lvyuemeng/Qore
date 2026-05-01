@@ -8,7 +8,6 @@ dependencies = [
     "qore-data",
     "qore-runner",
     "polars>=1.0",
-    "quantstats>=0.0.62",
 ]
 
 [dependency-groups]

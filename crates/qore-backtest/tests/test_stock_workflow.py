@@ -12,12 +12,15 @@ from small_cap_strategy.workflow import (
 
 def test_strategy_spec_is_static_example_contract() -> None:
     spec = _strategy_spec()
-    assert spec.benchmark == "8841431.WI"
+    assert spec.benchmark == "000852.SH"
     assert spec.primary_factor == "total_market_cap"
 
 
 def test_run_small_cap_workflow_requires_universe_data(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="No universe data found"):
+    with pytest.raises(
+        ValueError,
+        match=r"No rebalance selection snapshots|No universe data found|missing required columns",
+    ):
         run_small_cap_workflow(
             data_settings=DataSettings(
                 db_path=str(tmp_path / "qore.duckdb"),

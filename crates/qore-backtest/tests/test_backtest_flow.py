@@ -1,732 +1,240 @@
 from __future__ import annotations
 
-from datetime import date
-from pathlib import Path
-from typing import TYPE_CHECKING
+from datetime import date, timedelta
 
 import polars as pl
-import pytest
-from qore_backtest import (
-    BacktestSettings,
-    MappingDayFrameSource,
-    NullSignalOverlaySource,
-    StoreFactorSource,
-    StoreMarketDataSource,
-    TradingCalendar,
-)
+from qore_backtest import BacktestResult, BacktestSettings, TradingCalendar
 from qore_backtest.engine import BacktestEngine
-from qore_backtest.metrics import compute_metrics
-from qore_backtest.simulate import fill_order
-from qore_data import DataSettings
-from qore_data.store.duckdb import QoreStore
-from qore_data.universe import Universe
-from qore_runner import RunnerSettings
-from qore_runner.runner import StrategyRunner
 from qore_runner.sizer import EqualWeightSizer
-from qore_runner.strategies.crosssectional import CrossSectionalScreener
-from qore_runner.strategies.ranking import RankingStrategy, WeightedOverlayCombiner
-from qore_runner.strategy import StrategyContext
 
-if TYPE_CHECKING:
-    from qore_intelligence import IntelligenceSettings
+D = date(2026, 4, 13)
 
 
-class StubScoreProvider:
-    required_columns = frozenset({"factor_a"})
-
-    def predict_scores(self, factor_lf: pl.LazyFrame) -> pl.LazyFrame:
-        return factor_lf.select("symbol", pl.col("factor_a").alias("signal"))
-
-
-class StubSignalOverlaySource:
-    def __init__(self, by_day: dict[date, pl.DataFrame | pl.LazyFrame | None]) -> None:
-        self.by_day = by_day
-
-    def frame_for_day(
-        self,
-        trading_day: date,
-    ) -> pl.DataFrame | pl.LazyFrame | None:
-        return self.by_day.get(trading_day)
-
-
-def _stock_universe(symbols: list[str]) -> Universe:
-    exchange = [
-        "SH"
-        if symbol.endswith(".SH")
-        else "SZ"
-        if symbol.endswith(".SZ")
-        else "BJ"
-        if symbol.endswith(".BJ")
-        else "SH"
-        for symbol in symbols
-    ]
-    return Universe.from_frame(
-        pl.DataFrame(
-            {
-                "symbol": symbols,
-                "exchange": exchange,
-                "industry": ["test" for _ in symbols],
-                "price_limit_pct": [0.10 for _ in symbols],
-                "session": ["auction" for _ in symbols],
-            }
-        ),
-        session_col="session",
-    )
-
-
-def _data_settings(tmp_path: Path) -> DataSettings:
-    return DataSettings(
-        db_path=str(tmp_path / "qore.duckdb"),
-        parquet_root=str(tmp_path / "raw"),
-    )
-
-
-def _intelligence_settings(tmp_path: Path) -> IntelligenceSettings:
-    from qore_intelligence import IntelligenceSettings
-
-    return IntelligenceSettings(
-        model_store_root=str(tmp_path / "models"),
-        news_llm_daily_budget=50,
-        news_llm_model="claude-sonnet-4-20250514",
-        news_finbert_model="IDEA-CCNL/Erlangshen-Roberta-110M-Sentiment",
-        news_score_half_life_days=5,
-    )
-
-
-def test_fill_order_stock_fills_next_day() -> None:
-    price_data = pl.DataFrame(
+def _ohlcv(symbols: list[str], dates: list[date]) -> pl.DataFrame:
+    return pl.DataFrame(
         {
-            "date": [date(2026, 4, 13)],
-            "open": [10.0],
-            "is_suspended": [False],
-            "limit_up": [False],
-            "limit_down": [False],
+            "date": [d for d in dates for _ in symbols],
+            "symbol": symbols * len(dates),
+            "open": [10.0] * len(symbols) * len(dates),
+            "high": [10.5] * len(symbols) * len(dates),
+            "low": [9.8] * len(symbols) * len(dates),
+            "close": [10.1] * len(symbols) * len(dates),
+            "volume": [100] * len(symbols) * len(dates),
+            "amount": [1000.0] * len(symbols) * len(dates),
+            "adj_factor": [1.0] * len(symbols) * len(dates),
+            "is_suspended": [False] * len(symbols) * len(dates),
+            "limit_up": [False] * len(symbols) * len(dates),
+            "limit_down": [False] * len(symbols) * len(dates),
         }
     )
-    fill = fill_order(
-        "600519.SH",
-        "auction",
-        date(2026, 4, 10),
-        "buy",
-        100.0,
-        price_data,
-        BacktestSettings(),
-        TradingCalendar(),
-    )
-    assert fill.status == "filled"
-    assert fill.fill_date == date(2026, 4, 13)
 
 
-def test_backtest_engine_runs_end_to_end(tmp_path: Path) -> None:
-    store = QoreStore.from_settings(_data_settings(tmp_path))
-    factor_rows = pl.DataFrame(
-        {
-            "date": [date(2026, 4, 13), date(2026, 4, 13)],
-            "symbol": ["AAA.SH", "BBB.SZ"],
-            "factor_a": [0.1, 0.9],
-        }
-    )
-    store.write(
-        "stock_ohlcv",
-        pl.DataFrame(
-            {
-                "date": [date(2026, 4, 13), date(2026, 4, 13)],
-                "symbol": ["AAA.SH", "BBB.SZ"],
-                "open": [10.0, 10.0],
-                "high": [11.0, 12.0],
-                "low": [9.0, 9.5],
-                "close": [10.1, 11.0],
-                "volume": [100, 120],
-                "amount": [1000.0, 1200.0],
-                "adj_factor": [1.0, 1.0],
-                "is_suspended": [False, False],
-                "limit_up": [False, False],
-                "limit_down": [False, False],
-            }
-        ),
-    )
-    universe = _stock_universe(["AAA.SH", "BBB.SZ"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-    engine = BacktestEngine.from_settings(
-        BacktestSettings(),
-        runner,
-        TradingCalendar(),
-        factor_source=MappingDayFrameSource(
-            {date(2026, 4, 13): factor_rows.select("symbol", "factor_a")}
-        ),
-        market_data_source=StoreMarketDataSource(store=store),
-        signal_overlay_source=NullSignalOverlaySource(),
-    )
-    result = engine.run(universe, date(2026, 4, 13), date(2026, 4, 13))
-    metrics = compute_metrics(result)
-    assert result.nav.height == 1
-    assert result.fills.height == 1
-    assert result.diagnostics.height == 1
-    assert "annualized_return" in metrics
-    assert "win_rate" in metrics
-
-
-def test_backtest_engine_passes_signal_overlays_to_runner(tmp_path: Path) -> None:
-    store = QoreStore.from_settings(_data_settings(tmp_path))
-    factor_rows = pl.DataFrame(
-        {
-            "date": [date(2026, 4, 13), date(2026, 4, 13)],
-            "symbol": ["AAA.SH", "BBB.SZ"],
-            "factor_a": [0.1, 0.2],
-        }
-    )
-    store.write(
-        "stock_ohlcv",
-        pl.DataFrame(
-            {
-                "date": [date(2026, 4, 13), date(2026, 4, 13)],
-                "symbol": ["AAA.SH", "BBB.SZ"],
-                "open": [10.0, 10.0],
-                "high": [11.0, 12.0],
-                "low": [9.0, 9.5],
-                "close": [10.1, 11.0],
-                "volume": [100, 120],
-                "amount": [1000.0, 1200.0],
-                "adj_factor": [1.0, 1.0],
-                "is_suspended": [False, False],
-                "limit_up": [False, False],
-                "limit_down": [False, False],
-            }
-        ),
-    )
-    universe = _stock_universe(["AAA.SH", "BBB.SZ"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        RankingStrategy(
-            score_provider=StubScoreProvider(),
-            combiner=WeightedOverlayCombiner(alpha=0.8),
-        ),
-        EqualWeightSizer(top_k=1),
-    )
-    engine = BacktestEngine.from_settings(
-        BacktestSettings(),
-        runner,
-        TradingCalendar(),
-        factor_source=MappingDayFrameSource(
-            {date(2026, 4, 13): factor_rows.select("symbol", "factor_a")}
-        ),
-        market_data_source=StoreMarketDataSource(store=store),
-        signal_overlay_source=StubSignalOverlaySource(
-            {
-                date(2026, 4, 13): pl.DataFrame(
-                    {
-                        "symbol": ["AAA.SH", "BBB.SZ"],
-                        "overlay": [1.0, -1.0],
-                    }
-                )
-            }
-        ),
-    )
-
-    result = engine.run(universe, date(2026, 4, 13), date(2026, 4, 13))
-
-    assert result.positions.filter(pl.col("date") == date(2026, 4, 13)).get_column(
-        "symbol"
-    ).to_list() == ["AAA.SH"]
-    assert result.diagnostics.get_column("fill_request_count").item() == 1
-    assert result.diagnostics.get_column("rejected_count").item() == 1
-
-
-def test_backtest_engine_runs_with_saved_model_registry_artifact(
-    tmp_path: Path,
-) -> None:
-    model_pipeline_module = pytest.importorskip("qore_intelligence.model.pipeline")
-    model_registry_module = pytest.importorskip("qore_intelligence.model.registry")
-    normalizer_module = pytest.importorskip("qore_intelligence.model.normalizer")
-    lgbm_rank = pytest.importorskip("qore_intelligence.model.lgbm_rank")
-    strategy_module = pytest.importorskip("qore_intelligence.strategy")
-
-    store = QoreStore.from_settings(_data_settings(tmp_path))
-    pipeline = model_pipeline_module.ModelPipeline(
-        x_normalizer=normalizer_module.RankScaler(),
-        y_transformer=normalizer_module.CrossSectionalZScore(),
-        model=lgbm_rank.MultiHorizonRanker(horizons=[1], weights={"1d": 1.0}),
-    )
-    artifact = pipeline.fit(
-        pl.DataFrame(
-            {
-                "date": [
-                    date(2026, 1, 1),
-                    date(2026, 1, 1),
-                    date(2026, 1, 2),
-                    date(2026, 1, 2),
-                    date(2026, 1, 3),
-                    date(2026, 1, 3),
-                    date(2026, 1, 4),
-                    date(2026, 1, 4),
-                    date(2026, 1, 5),
-                    date(2026, 1, 5),
-                    date(2026, 1, 6),
-                    date(2026, 1, 6),
-                ],
-                "symbol": ["AAA.SH", "BBB.SZ"] * 6,
-                "factor_a": [
-                    0.1,
-                    0.2,
-                    0.2,
-                    0.1,
-                    0.3,
-                    0.1,
-                    0.4,
-                    0.2,
-                    0.5,
-                    0.2,
-                    0.6,
-                    0.3,
-                ],
-                "forward_return_1d": [
-                    0.01,
-                    0.02,
-                    0.02,
-                    0.01,
-                    0.03,
-                    0.01,
-                    0.04,
-                    0.02,
-                    0.05,
-                    0.02,
-                    0.06,
-                    0.03,
-                ],
-            }
-        ).lazy(),
-        store,
-        model_name="stock_ranker",
-    )
-    model_registry_module.ModelRegistry.from_settings(
-        _intelligence_settings(tmp_path)
-    ).save(
-        artifact,
-        "integration",
-    )
-    factor_rows = pl.DataFrame(
-        {
-            "date": [date(2026, 4, 13), date(2026, 4, 13)],
-            "symbol": ["AAA.SH", "BBB.SZ"],
-            "factor_a": [0.1, 0.9],
-        }
-    )
-    store.write(
-        "stock_ohlcv",
-        pl.DataFrame(
-            {
-                "date": [date(2026, 4, 13), date(2026, 4, 13)],
-                "symbol": ["AAA.SH", "BBB.SZ"],
-                "open": [10.0, 10.0],
-                "high": [10.5, 11.0],
-                "low": [9.8, 9.9],
-                "close": [10.1, 11.0],
-                "volume": [100, 120],
-                "amount": [1000.0, 1200.0],
-                "adj_factor": [1.0, 1.0],
-                "is_suspended": [False, False],
-                "limit_up": [False, False],
-                "limit_down": [False, False],
-            }
-        ),
-    )
-    universe = _stock_universe(["AAA.SH", "BBB.SZ"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        strategy_module.build_ranking_strategy(_intelligence_settings(tmp_path)),
-        EqualWeightSizer(top_k=1),
-    )
-    engine = BacktestEngine.from_settings(
-        BacktestSettings(),
-        runner,
-        TradingCalendar(),
-        factor_source=MappingDayFrameSource(
-            {date(2026, 4, 13): factor_rows.select("symbol", "factor_a")}
-        ),
-        market_data_source=StoreMarketDataSource(store=store),
-        signal_overlay_source=NullSignalOverlaySource(),
-    )
-
-    result = engine.run(universe, date(2026, 4, 13), date(2026, 4, 13))
-
-    assert result.positions.filter(pl.col("date") == date(2026, 4, 13)).get_column(
-        "symbol"
-    ).to_list() == ["BBB.SZ"]
-
-
-def test_backtest_engine_enforces_force_exit_overlay_liquidation(
-    tmp_path: Path,
-) -> None:
-    store = QoreStore.from_settings(_data_settings(tmp_path))
-    factor_rows = {
-        date(2026, 4, 13): pl.DataFrame(
-            {"symbol": ["AAA.SH", "BBB.SZ"], "factor_a": [0.9, 0.1]}
-        ),
-        date(2026, 4, 14): pl.DataFrame(
-            {"symbol": ["AAA.SH", "BBB.SZ"], "factor_a": [0.9, 0.1]}
-        ),
-    }
-    store.write(
-        "stock_ohlcv",
-        pl.DataFrame(
-            {
-                "date": [
-                    date(2026, 4, 13),
-                    date(2026, 4, 13),
-                    date(2026, 4, 14),
-                    date(2026, 4, 14),
-                    date(2026, 4, 15),
-                    date(2026, 4, 15),
-                ],
-                "symbol": [
-                    "AAA.SH",
-                    "BBB.SZ",
-                    "AAA.SH",
-                    "BBB.SZ",
-                    "AAA.SH",
-                    "BBB.SZ",
-                ],
-                "open": [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
-                "high": [10.5, 10.2, 10.5, 10.2, 10.5, 10.2],
-                "low": [9.8, 9.8, 9.8, 9.8, 9.8, 9.8],
-                "close": [10.1, 10.0, 10.1, 10.0, 10.1, 10.0],
-                "volume": [100, 100, 100, 100, 100, 100],
-                "amount": [1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0],
-                "adj_factor": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-                "is_suspended": [False, False, False, False, False, False],
-                "limit_up": [False, False, False, False, False, False],
-                "limit_down": [False, False, False, False, False, False],
-            }
-        ),
-    )
-    universe = _stock_universe(["AAA.SH", "BBB.SZ"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-    engine = BacktestEngine.from_settings(
-        BacktestSettings(),
-        runner,
-        TradingCalendar(),
-        factor_source=MappingDayFrameSource(factor_rows),
-        market_data_source=StoreMarketDataSource(store=store),
-        signal_overlay_source=NullSignalOverlaySource(),
-        decision_overlays_by_day={
-            date(2026, 4, 14): pl.DataFrame(
-                {
-                    "symbol": ["AAA.SH", "BBB.SZ"],
-                    "selected": [False, True],
-                    "exclude_reason": ["force_exit:audit", None],
-                }
+def _engine(signal_rows, *, cal=None, market=None, **kw) -> BacktestEngine:
+    cal = cal or TradingCalendar()
+    all_dates = list({r[0] for r in signal_rows})
+    md = _ohlcv(["AAA.SH", "BBB.SZ"], all_dates) if market is None else market
+    sig_rows = []
+    for d, symbols, sigs in signal_rows:
+        sig_rows.append(
+            pl.DataFrame(
+                {"date": [d] * len(symbols), "symbol": symbols, "signal": sigs}
             )
-        },
-    )
-
-    result = engine.run(universe, date(2026, 4, 13), date(2026, 4, 14))
-
-    assert result.diagnostics.get_column("force_exit_count").to_list() == [0, 1]
-    assert result.diagnostics.get_column("decision_non_selected_count").to_list() == [
-        1,
-        1,
-    ]
-    assert result.diagnostics.get_column("forced_liquidation_symbols").to_list() == [
-        "",
-        "AAA.SH",
-    ]
-    assert result.diagnostics.get_column("decision_selected_count").to_list() == [1, 1]
-    assert result.diagnostics.get_column("decision_new_symbols").to_list() == [
-        "",
-        "",
-    ]
-    assert result.diagnostics.get_column("decision_dropped_symbols").to_list() == [
-        "",
-        "",
-    ]
-    assert (
-        result.positions.filter(
-            (pl.col("date") == date(2026, 4, 14)) & (pl.col("symbol") == "AAA.SH")
         )
-        .get_column("weight")
-        .item()
-        == 0.0
+    signals = pl.concat(sig_rows).lazy()
+    return BacktestEngine(
+        config=BacktestSettings(buy_delay=0, sell_delay=0, **kw),
+        calendar=cal,
+        signals=signals,
+        market_data=md.lazy(),
+        sizer=EqualWeightSizer(max_weight=0.5),
+        top_k=1,
     )
 
 
-def test_strategy_runner_exposes_diagnostics() -> None:
-    universe = _stock_universe(["AAA", "BBB"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-    factor_lf = pl.DataFrame(
-        {
-            "symbol": ["AAA", "BBB"],
-            "factor_a": [0.1, 0.9],
-        }
-    ).lazy()
+# -- integration: multi-day run ───────────────────────────────────────
 
-    result = runner.step(
-        StrategyContext(
-            factor_lf=factor_lf,
-            universe=universe,
-            date=date(2026, 4, 13),
-            calendar=TradingCalendar(),
+
+def test_full_run_returns_all_frames() -> None:
+    engine = _engine(
+        [
+            (D, ["AAA.SH", "BBB.SZ"], [0.1, 0.9]),
+            (D + timedelta(days=1), ["AAA.SH", "BBB.SZ"], [0.9, 0.1]),
+        ],
+        start=D,
+        end=D + timedelta(days=1),
+    )
+    result = engine.run()
+    assert isinstance(result, BacktestResult)
+    assert result.nav.height == 2
+    assert result.positions.height >= 1
+    assert result.turnover.height == 2
+    assert result.fills.height >= 1
+    assert result.diagnostics.height == 2
+
+
+# -- selection edge cases ─────────────────────────────────────────────
+
+
+def test_rank_symbols_selects_highest_signal() -> None:
+    engine = _engine([(D, ["AAA.SH", "BBB.SZ"], [0.1, 0.9])])
+    result = engine.run()
+    selected = result.positions.get_column("symbol").to_list()
+    assert "BBB.SZ" in selected
+
+
+def test_empty_signals_day_skips_day() -> None:
+    engine = _engine(
+        [(D, ["AAA.SH"], [0.9])],
+        start=D + timedelta(days=5),
+        end=D + timedelta(days=5),
+    )
+    result = engine.run()
+    assert result.nav.height == 0
+
+
+# -- fill execution edge cases ─────────────────────────────────────────
+
+
+def test_pending_order_on_limit_up() -> None:
+    md = _ohlcv(["AAA.SH"], [D]).with_columns(pl.lit(True).alias("limit_up"))
+    engine = _engine([(D, ["AAA.SH"], [1.0])], market=md)
+    result = engine.run()
+    pending = result.fills.filter(pl.col("status") == "pending")
+    assert pending.height == 1
+
+
+def test_fill_schema_has_no_reason_column() -> None:
+    engine = _engine([(D, ["AAA.SH"], [0.9])])
+    result = engine.run()
+    assert "reason" not in result.fills.columns
+    assert set(result.fills.columns) == {
+        "date",
+        "symbol",
+        "status",
+        "fill_date",
+        "fill_price",
+        "quantity",
+    }
+
+
+def test_same_signal_two_days_keeps_position_unchanged() -> None:
+    engine = _engine(
+        [
+            (D, ["AAA.SH"], [1.0]),
+            (D + timedelta(days=1), ["AAA.SH"], [1.0]),
+        ],
+        start=D,
+        end=D + timedelta(days=1),
+    )
+    result = engine.run()
+    day2_fills = result.fills.filter(pl.col("date") == D + timedelta(days=1))
+    assert day2_fills.is_empty() or (
+        day2_fills.filter(pl.col("status") == "filled").height == 0
+    )
+
+
+def test_signal_change_triggers_new_fill() -> None:
+    engine = _engine(
+        [
+            (D, ["AAA.SH"], [1.0]),
+            (D + timedelta(days=1), ["AAA.SH", "BBB.SZ"], [0.01, 0.99]),
+        ],
+        start=D,
+        end=D + timedelta(days=1),
+    )
+    result = engine.run()
+    fills = result.fills.filter(pl.col("status") == "filled")
+    fill_symbols = fills.get_column("symbol").unique().to_list()
+    assert "BBB.SZ" in fill_symbols
+
+
+# -- metrics ──────────────────────────────────────────────────────────
+
+
+def test_metrics_shape_and_keys() -> None:
+    engine = _engine([(D, ["AAA.SH"], [0.9])], start=D, end=D)
+    result = engine.run()
+    m = result.metrics()
+    assert isinstance(m, dict)
+    expected = {
+        "annualized_return",
+        "sharpe_ratio",
+        "calmar_ratio",
+        "max_drawdown",
+        "sortino_ratio",
+        "information_ratio",
+        "win_rate",
+        "profit_factor",
+        "avg_turnover",
+        "total_commission_cost",
+    }
+    assert set(m) == expected
+
+
+def test_metrics_all_zero_on_empty_result() -> None:
+    empty = BacktestResult(
+        nav=pl.DataFrame(
+            schema={"date": pl.Date, "nav": pl.Float64, "return": pl.Float64}
         ),
-        pl.Series("nav", [1.0]),
-    )
-
-    assert result.diagnostics.candidate_count == 2
-    assert result.diagnostics.signal_count == 2
-    assert result.diagnostics.selected_count == 1
-    assert result.diagnostics.non_selected_count == 1
-    assert result.diagnostics.drawdown_blocked is False
-
-
-def test_backtest_engine_supports_factor_provider_parity(tmp_path: Path) -> None:
-    store = QoreStore.from_settings(_data_settings(tmp_path))
-    factor_rows = pl.DataFrame(
-        {
-            "date": [date(2026, 4, 13), date(2026, 4, 13)],
-            "symbol": ["AAA.SH", "BBB.SZ"],
-            "factor_a": [0.1, 0.9],
-        }
-    )
-    store.write(
-        "stock_ohlcv",
-        pl.DataFrame(
-            {
-                "date": [date(2026, 4, 13), date(2026, 4, 13)],
-                "symbol": ["AAA.SH", "BBB.SZ"],
-                "open": [10.0, 10.0],
-                "high": [11.0, 12.0],
-                "low": [9.0, 9.5],
-                "close": [10.1, 11.0],
-                "volume": [100, 120],
-                "amount": [1000.0, 1200.0],
-                "adj_factor": [1.0, 1.0],
-                "is_suspended": [False, False],
-                "limit_up": [False, False],
-                "limit_down": [False, False],
+        positions=pl.DataFrame(
+            schema={"date": pl.Date, "symbol": pl.String, "weight": pl.Float64}
+        ),
+        turnover=pl.DataFrame(
+            schema={
+                "date": pl.Date,
+                "turnover": pl.Float64,
+                "commission": pl.Float64,
+                "risk_flag": pl.Boolean,
+            }
+        ),
+        fills=pl.DataFrame(
+            schema={
+                "date": pl.Date,
+                "symbol": pl.String,
+                "status": pl.String,
+                "fill_date": pl.Date,
+                "fill_price": pl.Float64,
+                "quantity": pl.Float64,
+            }
+        ),
+        diagnostics=pl.DataFrame(
+            schema={
+                "date": pl.Date,
+                "nav": pl.Float64,
+                "daily_return": pl.Float64,
+                "turnover": pl.Float64,
+                "commission_cost": pl.Float64,
+                "fill_request_count": pl.Int64,
+                "filled_count": pl.Int64,
+                "pending_count": pl.Int64,
+                "rejected_count": pl.Int64,
+                "selected_count": pl.Int64,
             }
         ),
     )
-    universe = _stock_universe(["AAA.SH", "BBB.SZ"])
-    store_runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-
-    store_engine = BacktestEngine.from_settings(
-        BacktestSettings(),
-        store_runner,
-        TradingCalendar(),
-        factor_source=MappingDayFrameSource(
-            {date(2026, 4, 13): factor_rows.select("symbol", "factor_a")}
-        ),
-        market_data_source=StoreMarketDataSource(store=store),
-        signal_overlay_source=NullSignalOverlaySource(),
-    )
-    store_result = store_engine.run(universe, date(2026, 4, 13), date(2026, 4, 13))
-
-    provider_runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-
-    provider_engine = BacktestEngine.from_settings(
-        BacktestSettings(),
-        provider_runner,
-        TradingCalendar(),
-        market_data_source=StoreMarketDataSource(store=store),
-        signal_overlay_source=NullSignalOverlaySource(),
-        factor_source=MappingDayFrameSource(
-            {date(2026, 4, 13): factor_rows.select("symbol", "factor_a")}
-        ),
-    )
-    provider_result = provider_engine.run(
-        universe,
-        date(2026, 4, 13),
-        date(2026, 4, 13),
-    )
-
-    assert provider_result.nav.equals(store_result.nav)
-    assert provider_result.positions.equals(store_result.positions)
-    assert provider_result.turnover.equals(store_result.turnover)
+    m = empty.metrics()
+    assert all(v == 0.0 for v in m.values())
 
 
-def test_backtest_engine_factor_provider_guardrails_rejects_factor_name_long_frame(
-    tmp_path: Path,
-) -> None:
-    store = QoreStore.from_settings(_data_settings(tmp_path))
-    store.write(
-        "stock_ohlcv",
-        pl.DataFrame(
-            {
-                "date": [date(2026, 4, 13), date(2026, 4, 13)],
-                "symbol": ["AAA.SH", "BBB.SZ"],
-                "open": [10.0, 10.0],
-                "high": [11.0, 12.0],
-                "low": [9.0, 9.5],
-                "close": [10.1, 11.0],
-                "volume": [100, 120],
-                "amount": [1000.0, 1200.0],
-                "adj_factor": [1.0, 1.0],
-                "is_suspended": [False, False],
-                "limit_up": [False, False],
-                "limit_down": [False, False],
-            }
-        ),
+def test_metrics_with_benchmark() -> None:
+    engine = _engine(
+        [(D, ["AAA.SH"], [0.9]), (D + timedelta(days=1), ["AAA.SH"], [0.9])],
+        start=D,
+        end=D + timedelta(days=1),
     )
-    universe = _stock_universe(["AAA.SH", "BBB.SZ"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-    engine = BacktestEngine.from_settings(
-        BacktestSettings(),
-        runner,
-        TradingCalendar(),
-        market_data_source=StoreMarketDataSource(store=store),
-        signal_overlay_source=NullSignalOverlaySource(),
-        factor_source=MappingDayFrameSource(
-            {
-                date(2026, 4, 13): pl.DataFrame(
-                    {
-                        "symbol": ["AAA.SH", "BBB.SZ"],
-                        "factor_name": ["factor_a", "factor_a"],
-                        "z_score": [0.2, 0.1],
-                    }
-                )
-            }
-        ),
-    )
-
-    with pytest.raises(ValueError, match="long-frame contracts"):
-        engine.run(universe, date(2026, 4, 13), date(2026, 4, 13))
+    result = engine.run()
+    benchmark = pl.Series("nav", [100.0, 101.0])
+    m = result.metrics(benchmark_nav=benchmark)
+    assert m["information_ratio"] != 0.0
 
 
-def test_backtest_engine_factor_provider_empty_day_fails_fast(tmp_path: Path) -> None:
-    store = QoreStore.from_settings(_data_settings(tmp_path))
-    store.write(
-        "stock_ohlcv",
-        pl.DataFrame(
-            {
-                "date": [date(2026, 4, 13), date(2026, 4, 13)],
-                "symbol": ["AAA.SH", "BBB.SZ"],
-                "open": [10.0, 10.0],
-                "high": [11.0, 12.0],
-                "low": [9.0, 9.5],
-                "close": [10.1, 11.0],
-                "volume": [100, 120],
-                "amount": [1000.0, 1200.0],
-                "adj_factor": [1.0, 1.0],
-                "is_suspended": [False, False],
-                "limit_up": [False, False],
-                "limit_down": [False, False],
-            }
-        ),
-    )
-    universe = _stock_universe(["AAA.SH", "BBB.SZ"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-    engine = BacktestEngine.from_settings(
-        BacktestSettings(),
-        runner,
-        TradingCalendar(),
-        market_data_source=StoreMarketDataSource(store=store),
-        signal_overlay_source=NullSignalOverlaySource(),
-        factor_source=MappingDayFrameSource({date(2026, 4, 13): None}),
-    )
-
-    with pytest.raises(ValueError, match="Missing required factor columns"):
-        engine.run(universe, date(2026, 4, 13), date(2026, 4, 13))
+# -- view integration ─────────────────────────────────────────────────
 
 
-def test_backtest_engine_store_factor_source_respects_constructor_factor_columns(
-    tmp_path: Path,
-) -> None:
-    store = QoreStore.from_settings(_data_settings(tmp_path))
-    store.write(
-        "factor_scores",
-        pl.DataFrame(
-            {
-                "date": [date(2026, 4, 13), date(2026, 4, 13)],
-                "symbol": ["AAA.SH", "BBB.SZ"],
-                "factor_name": ["style", "style"],
-                "raw_value": [0.9, 0.1],
-                "z_score": [0.1, 0.9],
-                "rank_pct": [1.0, 0.5],
-            }
-        ),
-    )
-    store.write(
-        "stock_ohlcv",
-        pl.DataFrame(
-            {
-                "date": [date(2026, 4, 13), date(2026, 4, 13)],
-                "symbol": ["AAA.SH", "BBB.SZ"],
-                "open": [10.0, 10.0],
-                "high": [11.0, 12.0],
-                "low": [9.0, 9.5],
-                "close": [10.1, 11.0],
-                "volume": [100, 120],
-                "amount": [1000.0, 1200.0],
-                "adj_factor": [1.0, 1.0],
-                "is_suspended": [False, False],
-                "limit_up": [False, False],
-                "limit_down": [False, False],
-            }
-        ),
-    )
-    universe = _stock_universe(["AAA.SH", "BBB.SZ"])
-
-    default_runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"z_score": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-    default_result = BacktestEngine.from_settings(
-        BacktestSettings(),
-        default_runner,
-        TradingCalendar(),
-        factor_source=StoreFactorSource(
-            store=store,
-            dataset="factor_scores",
-            factor_columns=("z_score",),
-        ),
-        market_data_source=StoreMarketDataSource(store=store),
-        signal_overlay_source=NullSignalOverlaySource(),
-    ).run(universe, date(2026, 4, 13), date(2026, 4, 13))
-
-    raw_runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"raw_value": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-    raw_result = BacktestEngine.from_settings(
-        BacktestSettings(),
-        raw_runner,
-        TradingCalendar(),
-        factor_source=StoreFactorSource(
-            store=store,
-            dataset="factor_scores",
-            factor_columns=("raw_value",),
-        ),
-        market_data_source=StoreMarketDataSource(store=store),
-        signal_overlay_source=NullSignalOverlaySource(),
-    ).run(universe, date(2026, 4, 13), date(2026, 4, 13))
-
-    assert default_result.positions.get_column("symbol").to_list() == ["BBB.SZ"]
-    assert raw_result.positions.get_column("symbol").to_list() == ["AAA.SH"]
+def test_view_chain() -> None:
+    engine = _engine([(D, ["AAA.SH"], [0.9])], start=D, end=D)
+    result = engine.run()
+    view = result.view().with_drawdown()
+    assert view.drawdown is not None
+    windowed = view.window(start=D)
+    assert windowed.nav.height == 1
