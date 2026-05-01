@@ -1,58 +1,27 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass
 
 import polars as pl
-from qore_data.universe import TradingSession
-
-from qore_runner.schedule import RebalanceSchedule
-from qore_runner.strategy import (
-    StrategyContext,
-    align_signals_to_universe,
-    tradeable_universe_frame,
-)
 
 
 @dataclass(slots=True)
 class CrossSectionalScreener:
     factor_weights: dict[str, float]
     name: str = "cross_sectional_screener"
-    compatible_sessions: frozenset[TradingSession] = frozenset({"nav", "auction"})
-    rebalance_schedule: RebalanceSchedule = field(
-        default_factory=lambda: RebalanceSchedule(frequency="monthly")
-    )
-
-    @property
-    def signal_freq(self) -> Literal["event", "daily", "weekly", "monthly"]:
-        return self.rebalance_schedule.frequency
-
-    def strategy_rebalance_schedule(self) -> RebalanceSchedule:
-        return self.rebalance_schedule
 
     @property
     def required_columns(self) -> frozenset[str]:
         return frozenset(self.factor_weights)
 
-    def generate(self, context: StrategyContext) -> pl.LazyFrame:
-        universe_frame = tradeable_universe_frame(
-            context.universe,
-            context.date,
-            context.calendar,
-            self.compatible_sessions,
-        )
+    def generate(self, factor_lf: pl.LazyFrame) -> pl.LazyFrame:
         if not self.factor_weights:
-            return align_signals_to_universe(
-                pl.DataFrame(schema={"symbol": pl.String, "signal": pl.Float64}).lazy(),
-                universe_frame,
+            return factor_lf.select(
+                "symbol", pl.lit(None, dtype=pl.Float64).alias("signal")
             )
-        scored = context.factor_lf.select(
+        return factor_lf.select(
             "symbol",
             pl.sum_horizontal(
-                *(
-                    pl.col(column) * weight
-                    for column, weight in self.factor_weights.items()
-                )
+                *(pl.col(c) * w for c, w in self.factor_weights.items())
             ).alias("signal"),
         )
-        return align_signals_to_universe(scored, universe_frame)

@@ -1,64 +1,53 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
-from typing import Literal, Protocol
+from typing import Protocol
 
 import polars as pl
-from qore_data.universe import TradingSession
 
-from qore_runner.schedule import RebalanceSchedule
-from qore_runner.strategy import Strategy, StrategyContext
+from qore_runner.strategy import Strategy
 
 
 class RegimeDetector(Protocol):
-    def scale(self, lf: pl.LazyFrame, as_of: date) -> float: ...
+    def scale(self, lf: pl.LazyFrame) -> float: ...
 
 
 @dataclass(slots=True)
 class BehavioralGatedStrategy:
     base: Strategy
     regime_detector: RegimeDetector | None = None
-    vol_lookback: int = 20
+    vol_column: str = ""
     min_scale: float = 0.5
     name: str = "behavioral_gated"
 
     @property
-    def compatible_sessions(self) -> frozenset[TradingSession]:
-        return self.base.compatible_sessions
-
-    def strategy_rebalance_schedule(self) -> RebalanceSchedule:
-        return self.base.strategy_rebalance_schedule()
-
-    @property
-    def signal_freq(self) -> Literal["event", "daily", "weekly", "monthly"]:
-        return self.strategy_rebalance_schedule().frequency
-
-    @property
     def required_columns(self) -> frozenset[str]:
-        return self.base.required_columns | {"realized_vol_20d"}
+        extra = frozenset({self.vol_column}) if self.vol_column else frozenset()
+        return self.base.required_columns | extra
 
-    def generate(self, context: StrategyContext) -> pl.LazyFrame:
-        base_signal = self.base.generate(context)
-        regime_scale = self._regime_scale(context.factor_lf, context.date)
-        vol_scale = self._vol_scale(context.factor_lf)
+    def generate(self, factor_lf: pl.LazyFrame) -> pl.LazyFrame:
+        base_signal = self.base.generate(factor_lf)
+        regime_scale = self._regime_scale(factor_lf)
+        vol_scale = self._vol_scale(factor_lf)
         scale = max(self.min_scale, min(1.0, regime_scale * vol_scale))
         return base_signal.with_columns(
             (pl.col("signal") * pl.lit(scale)).alias("signal")
         )
 
-    def _regime_scale(self, lf: pl.LazyFrame, as_of: date) -> float:
+    def _regime_scale(self, lf: pl.LazyFrame) -> float:
         if self.regime_detector is None:
             return 1.0
-        return min(max(float(self.regime_detector.scale(lf, as_of)), 0.0), 1.0)
+        return min(max(float(self.regime_detector.scale(lf)), 0.0), 1.0)
 
     def _vol_scale(self, lf: pl.LazyFrame) -> float:
+        if not self.vol_column:
+            return 1.0
         schema = lf.collect_schema()
-        if "realized_vol_20d" not in schema:
+        if self.vol_column not in schema:
             return 1.0
         summary = pl.DataFrame(
             lf.select(
-                pl.col("realized_vol_20d").fill_null(0.0).mean().alias("mean_vol")
+                pl.col(self.vol_column).fill_null(0.0).mean().alias("mean_vol")
             ).collect()
         )
         mean_value = summary.get_column("mean_vol").item()

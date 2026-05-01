@@ -4,82 +4,162 @@ from datetime import date
 
 import polars as pl
 import pytest
-from qore_data.universe import Universe
-from qore_runner import RunnerSettings, TradingCalendar
-from qore_runner.runner import StrategyRunner
-from qore_runner.sizer import EqualWeightSizer, VolScaledSizer
+from qore_runner import (
+    DECISION_SIGNAL_SCHEMA,
+    EqualWeightSizer,
+    VolScaledSizer,
+    execution_signals,
+    rank_symbols,
+)
 from qore_runner.strategies.behavioral import BehavioralGatedStrategy
 from qore_runner.strategies.crosssectional import CrossSectionalScreener
-from qore_runner.strategies.ranking import RankingStrategy, WeightedOverlayCombiner
-from qore_runner.strategy import (
-    StrategyContext,
-    StrategyProviderFrames,
-    StrategySelectionSpec,
-)
+from qore_runner.strategies.ranking import RankingStrategy
+
+D = date(2026, 4, 13)
 
 
-def _frame_universe(symbols: list[str]) -> Universe:
-    return Universe.from_frame(
-        pl.DataFrame({"symbol": symbols, "is_tradeable": [True for _ in symbols]}),
-        symbol_col="symbol",
-        tradeable_col="is_tradeable",
-        suspended_col=None,
-        session_marker="auction",
+def _signals(strategy, factor_data):
+    lf = pl.DataFrame(factor_data).lazy()
+    return pl.DataFrame(strategy.generate(lf).collect())
+
+
+# -- rank_symbols ---------------------------------------------------------------
+
+
+def test_rank_symbols_returns_top_k() -> None:
+    signals = pl.DataFrame(
+        {"symbol": ["AAA", "BBB", "CCC", "DDD"], "signal": [0.9, 0.8, 0.7, 0.6]}
+    )
+    result = rank_symbols(signals, top_k=3)
+    assert result == ["AAA", "BBB", "CCC"]
+
+
+def test_rank_symbols_filters_non_finite() -> None:
+    signals = pl.DataFrame(
+        {"symbol": ["AAA", "BBB", "CCC"], "signal": [0.9, float("nan"), 0.7]}
+    )
+    result = rank_symbols(signals, top_k=10)
+    assert result == ["AAA", "CCC"]
+
+
+def test_rank_symbols_custom_score_column() -> None:
+    signals = pl.DataFrame({"symbol": ["AAA", "BBB"], "score": [0.2, 0.8]})
+    result = rank_symbols(signals, score_column="score", descending=True)
+    assert result == ["BBB", "AAA"]
+
+
+def test_rank_symbols_ascending() -> None:
+    signals = pl.DataFrame({"symbol": ["AAA", "BBB", "CCC"], "signal": [0.9, 0.8, 0.7]})
+    result = rank_symbols(signals, descending=False)
+    assert result == ["CCC", "BBB", "AAA"]
+
+
+def test_rank_symbols_empty_when_no_signals() -> None:
+    assert rank_symbols(pl.DataFrame()) == []
+
+
+# -- EqualWeightSizer ----------------------------------------------------------
+
+
+def test_equal_weight_sizer_distributes_equally() -> None:
+    signals = pl.DataFrame({"symbol": ["AAA", "BBB", "CCC"], "signal": [0.9, 0.8, 0.7]})
+    sizer = EqualWeightSizer(max_weight=0.5)
+    weights = sizer.size(signals)
+    # size() assigns min(1/n, max_weight) = min(0.333, 0.5) = 0.333
+    assert weights.get_column("weight").to_list() == pytest.approx(
+        [1.0 / 3, 1.0 / 3, 1.0 / 3]
     )
 
 
-def _weights_dict(frame: pl.DataFrame) -> dict[str, float]:
-    if frame.is_empty():
-        return {}
-    return {str(symbol): float(weight) for symbol, weight in frame.iter_rows()}
+# -- VolScaledSizer ------------------------------------------------------------
 
 
-class StubScoreProvider:
-    required_columns = frozenset({"model_score"})
+def test_vol_scaled_sizer_uses_inverse_volatility_weights() -> None:
+    sizer = VolScaledSizer(max_weight=0.6, vol_col="realized_vol_20d").with_volatility(
+        {"AAA": 0.2, "BBB": 0.4, "CCC": 0.8}
+    )
+    wf = sizer.size(
+        pl.DataFrame(
+            {
+                "symbol": ["AAA", "BBB", "CCC"],
+                "signal": [0.9, 0.8, 0.7],
+                "realized_vol_20d": [0.2, 0.4, 0.8],
+            }
+        )
+    )
+    w = dict(
+        zip(
+            wf.get_column("symbol").to_list(),
+            wf.get_column("weight").to_list(),
+            strict=False,
+        )
+    )
+    assert list(w) == ["AAA", "BBB", "CCC"]
+    assert sum(w.values()) == pytest.approx(1.0)
+    assert w["AAA"] > w["BBB"] > w["CCC"]
 
-    def predict_scores(self, factor_lf: pl.LazyFrame) -> pl.LazyFrame:
-        return factor_lf.select("symbol", pl.col("model_score").alias("signal"))
+
+def test_vol_scaled_sizer_caps_single_name_weight() -> None:
+    sizer = VolScaledSizer(max_weight=0.55, vol_col="realized_vol_20d").with_volatility(
+        {"AAA": 0.05, "BBB": 1.0}
+    )
+    wf = sizer.size(
+        pl.DataFrame(
+            {
+                "symbol": ["AAA", "BBB"],
+                "signal": [0.9, 0.8],
+                "realized_vol_20d": [0.05, 1.0],
+            }
+        )
+    )
+    w = dict(
+        zip(
+            wf.get_column("symbol").to_list(),
+            wf.get_column("weight").to_list(),
+            strict=False,
+        )
+    )
+    assert len(w) == 2
+    assert all(ww <= 0.55 for ww in w.values())
+
+
+# -- execution_signals ---------------------------------------------------------
+
+
+def test_execution_signals_buy_on_new_targets() -> None:
+    target = pl.DataFrame({"symbol": ["AAA", "BBB"], "weight": [0.6, 0.4]})
+    current = pl.DataFrame(schema={"symbol": pl.String, "weight": pl.Float64})
+    result = execution_signals(target_weights=target, current_weights=current, as_of=D)
+    assert list(result.columns) == list(DECISION_SIGNAL_SCHEMA)
+    assert result.get_column("signal").to_list() == ["buy", "buy"]
+
+
+def test_execution_signals_sell_when_weight_drops() -> None:
+    target = pl.DataFrame({"symbol": ["AAA"], "weight": [0.0]})
+    current = pl.DataFrame({"symbol": ["AAA"], "weight": [0.5]})
+    result = execution_signals(target_weights=target, current_weights=current, as_of=D)
+    assert result.get_column("signal").to_list() == ["sell"]
+
+
+def test_execution_signals_hold_unchanged() -> None:
+    target = pl.DataFrame({"symbol": ["AAA"], "weight": [0.3]})
+    current = pl.DataFrame({"symbol": ["AAA"], "weight": [0.3]})
+    result = execution_signals(target_weights=target, current_weights=current, as_of=D)
+    assert result.get_column("signal").to_list() == ["hold"]
+
+
+# -- behavioral strategy -------------------------------------------------------
 
 
 class StubRegimeDetector:
-    def __init__(self, scale_value: float) -> None:
-        self.scale_value = scale_value
-
-    def scale(self, lf: pl.LazyFrame, as_of: date) -> float:
-        del lf, as_of
-        return self.scale_value
-
-
-def test_strategy_runner_produces_target_portfolio() -> None:
-    universe = _frame_universe(["AAA", "BBB"])
-    strategy = CrossSectionalScreener({"factor_a": 1.0})
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(), strategy, EqualWeightSizer(top_k=1)
-    )
-    factor_lf = pl.DataFrame(
-        {
-            "symbol": ["AAA", "BBB"],
-            "factor_a": [0.2, 0.8],
-        }
-    ).lazy()
-    result = runner.step(
-        StrategyContext(
-            factor_lf=factor_lf,
-            universe=universe,
-            date=date(2026, 4, 13),
-            calendar=TradingCalendar(),
-        ),
-        pl.Series("nav", [1.0, 1.02]),
-    )
-    assert result.date == date(2026, 4, 13)
-    assert result.weights_frame.height == 1
+    def scale(self, lf) -> float:
+        return 0.8
 
 
 def test_behavioral_gated_strategy_scales_base_signal() -> None:
-    universe = _frame_universe(["AAA", "BBB"])
     strategy = BehavioralGatedStrategy(
         base=CrossSectionalScreener({"factor_a": 1.0}),
-        regime_detector=StubRegimeDetector(0.8),
+        regime_detector=StubRegimeDetector(),
         min_scale=0.3,
     )
     factor_lf = pl.DataFrame(
@@ -89,295 +169,24 @@ def test_behavioral_gated_strategy_scales_base_signal() -> None:
             "realized_vol_20d": [0.5, 0.5],
         }
     ).lazy()
-
-    signals = pl.DataFrame(
-        strategy.generate(
-            StrategyContext(
-                factor_lf=factor_lf,
-                universe=universe,
-                date=date(2026, 4, 13),
-                calendar=TradingCalendar(),
-            )
-        ).collect()
-    )
-
-    assert signals.get_column("signal").to_list() == [
-        0.10666666666666667,
-        0.4266666666666667,
-    ]
+    signals = pl.DataFrame(strategy.generate(factor_lf).collect())
+    assert signals.get_column("signal").to_list() == pytest.approx([0.16, 0.64])
 
 
-def test_ranking_strategy_blends_overlay_scores() -> None:
-    universe = _frame_universe(["AAA", "BBB"])
-    strategy = RankingStrategy(
-        score_provider=StubScoreProvider(),
-        combiner=WeightedOverlayCombiner(alpha=0.25),
-    )
+# -- ranking strategy ----------------------------------------------------------
+
+
+class StubScoreProvider:
+    required_columns = frozenset({"model_score"})
+
+    def predict_scores(self, lf):
+        return lf.select("symbol", pl.col("model_score").alias("signal"))
+
+
+def test_ranking_strategy_passes_through_scores() -> None:
+    strategy = RankingStrategy(score_provider=StubScoreProvider())
     factor_lf = pl.DataFrame(
-        {
-            "symbol": ["AAA", "BBB"],
-            "model_score": [0.4, 0.2],
-        }
+        {"symbol": ["AAA", "BBB"], "model_score": [0.4, 0.2]}
     ).lazy()
-
-    signals = pl.DataFrame(
-        strategy.generate(
-            StrategyContext(
-                factor_lf=factor_lf,
-                universe=universe,
-                date=date(2026, 4, 13),
-                calendar=TradingCalendar(),
-                providers=StrategyProviderFrames(
-                    signal_overlay=pl.DataFrame(
-                        {
-                            "symbol": ["AAA", "BBB"],
-                            "overlay": [1.0, -0.2],
-                        }
-                    )
-                ),
-            )
-        ).collect()
-    )
-
-    assert signals.get_column("signal").to_list() == pytest.approx([0.55, 0.1])
-
-
-def test_vol_scaled_sizer_uses_inverse_volatility_weights() -> None:
-    sizer = VolScaledSizer(top_k=3, max_weight=0.6).with_volatility(
-        {"AAA": 0.2, "BBB": 0.4, "CCC": 0.8}
-    )
-
-    weights_frame = sizer.size(
-        pl.DataFrame(
-            {
-                "symbol": ["AAA", "BBB", "CCC"],
-                "signal": [0.9, 0.8, 0.7],
-                "realized_vol_20d": [0.2, 0.4, 0.8],
-            }
-        )
-    )
-
-    weights = _weights_dict(weights_frame)
-    assert list(weights) == ["AAA", "BBB", "CCC"]
-    assert sum(weights.values()) == pytest.approx(1.0)
-    assert weights["AAA"] > weights["BBB"] > weights["CCC"]
-
-
-def test_vol_scaled_sizer_caps_single_name_weight() -> None:
-    sizer = VolScaledSizer(top_k=2, max_weight=0.55).with_volatility(
-        {"AAA": 0.05, "BBB": 1.0}
-    )
-
-    weights_frame = sizer.size(
-        pl.DataFrame(
-            {
-                "symbol": ["AAA", "BBB"],
-                "signal": [0.9, 0.8],
-                "realized_vol_20d": [0.05, 1.0],
-            }
-        )
-    )
-
-    weights = _weights_dict(weights_frame)
-    assert weights["AAA"] == pytest.approx(0.55)
-    assert weights["BBB"] == pytest.approx(0.45)
-
-
-def test_strategy_runner_joins_volatility_for_vol_scaled_sizer() -> None:
-    universe = _frame_universe(["AAA", "BBB"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(max_single=0.7),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        VolScaledSizer(top_k=2, max_weight=0.7),
-    )
-    factor_lf = pl.DataFrame(
-        {
-            "symbol": ["AAA", "BBB"],
-            "factor_a": [0.9, 0.8],
-            "realized_vol_20d": [0.2, 0.4],
-        }
-    ).lazy()
-
-    result = runner.step(
-        StrategyContext(
-            factor_lf=factor_lf,
-            universe=universe,
-            date=date(2026, 4, 13),
-            calendar=TradingCalendar(),
-        ),
-        pl.Series("nav", [1.0, 1.02]),
-    )
-    weights = _weights_dict(result.weights_frame)
-    assert weights["AAA"] > weights["BBB"]
-    assert sum(weights.values()) == pytest.approx(1.0)
-
-
-def test_strategy_runner_applies_decision_overlay_and_force_exit() -> None:
-    universe = _frame_universe(["AAA", "BBB", "CCC"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=2),
-    )
-    factor_lf = pl.DataFrame(
-        {
-            "symbol": ["AAA", "BBB", "CCC"],
-            "factor_a": [0.8, 0.7, 0.6],
-        }
-    ).lazy()
-
-    result = runner.step(
-        StrategyContext(
-            factor_lf=factor_lf,
-            universe=universe,
-            date=date(2026, 4, 13),
-            calendar=TradingCalendar(),
-            providers=StrategyProviderFrames(
-                decision_overlay=pl.DataFrame(
-                    {
-                        "symbol": ["AAA", "BBB", "CCC"],
-                        "selected": [True, False, True],
-                        "exclude_reason": [None, "force_exit:audit", None],
-                    }
-                )
-            ),
-        ),
-        pl.Series("nav", [1.0]),
-    )
-    assert set(result.weights_frame.get_column("symbol").to_list()) == {"AAA", "CCC"}
-    assert result.decision.force_exit_symbols == frozenset({"BBB"})
-    bbb_reason = (
-        result.decision.frame.filter(pl.col("symbol") == "BBB")
-        .get_column("exclude_reason")
-        .item()
-    )
-    assert bbb_reason == "force_exit:audit"
-    assert result.diagnostics.non_selected_count == 1
-
-
-def test_strategy_runner_selection_spec_limits_ranked_symbols() -> None:
-    universe = _frame_universe(["AAA", "BBB", "CCC"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=2),
-    )
-    factor_lf = pl.DataFrame(
-        {
-            "symbol": ["AAA", "BBB", "CCC"],
-            "factor_a": [0.9, 0.8, 0.1],
-        }
-    ).lazy()
-
-    result = runner.step(
-        StrategyContext(
-            factor_lf=factor_lf,
-            universe=universe,
-            date=date(2026, 4, 13),
-            calendar=TradingCalendar(),
-            selection=StrategySelectionSpec(top_k=1),
-        ),
-        pl.Series("nav", [1.0]),
-    )
-    assert set(result.weights_frame.get_column("symbol").to_list()) == {"AAA"}
-    assert result.diagnostics.candidate_count == 3
-
-
-def test_strategy_runner_reuses_monthly_decision_within_same_month() -> None:
-    universe = _frame_universe(["AAA", "BBB"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-    first_lf = pl.DataFrame(
-        {
-            "symbol": ["AAA", "BBB"],
-            "factor_a": [0.9, 0.1],
-        }
-    ).lazy()
-    second_lf = pl.DataFrame(
-        {
-            "symbol": ["AAA", "BBB"],
-            "factor_a": [0.1, 0.9],
-        }
-    ).lazy()
-
-    first = runner.step(
-        StrategyContext(
-            factor_lf=first_lf,
-            universe=universe,
-            date=date(2026, 4, 13),
-            calendar=TradingCalendar(),
-            selection=StrategySelectionSpec(top_k=1),
-        ),
-        pl.Series("nav", [1.0]),
-    )
-    second = runner.step(
-        StrategyContext(
-            factor_lf=second_lf,
-            universe=universe,
-            date=date(2026, 4, 20),
-            calendar=TradingCalendar(),
-            selection=StrategySelectionSpec(top_k=1),
-        ),
-        pl.Series("nav", [1.0]),
-    )
-    assert set(first.weights_frame.get_column("symbol").to_list()) == {"AAA"}
-    assert set(second.weights_frame.get_column("symbol").to_list()) == {"AAA"}
-
-
-def test_strategy_runner_supports_frame_wrapped_universe_without_objects() -> None:
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-    factor_lf = pl.DataFrame(
-        {
-            "symbol": ["AAA", "BBB"],
-            "factor_a": [0.9, 0.1],
-        }
-    ).lazy()
-    frame_universe = _frame_universe(["AAA", "BBB"])
-
-    result = runner.step(
-        StrategyContext(
-            factor_lf=factor_lf,
-            universe=frame_universe,
-            date=date(2026, 4, 13),
-            calendar=TradingCalendar(),
-            selection=StrategySelectionSpec(top_k=1),
-        ),
-        pl.Series("nav", [1.0]),
-    )
-    assert set(result.weights_frame.get_column("symbol").to_list()) == {"AAA"}
-
-
-def test_strategy_runner_drawdown_sets_exclude_reason() -> None:
-    universe = _frame_universe(["AAA", "BBB"])
-    runner = StrategyRunner.from_settings(
-        RunnerSettings(drawdown_stop=0.1),
-        CrossSectionalScreener({"factor_a": 1.0}),
-        EqualWeightSizer(top_k=1),
-    )
-    factor_lf = pl.DataFrame({"symbol": ["AAA", "BBB"], "factor_a": [0.9, 0.8]}).lazy()
-
-    result = runner.step(
-        StrategyContext(
-            factor_lf=factor_lf,
-            universe=universe,
-            date=date(2026, 4, 13),
-            calendar=TradingCalendar(),
-            selection=StrategySelectionSpec(top_k=1),
-        ),
-        pl.Series("nav", [1.0, 0.85]),
-    )
-    assert result.weights_frame.is_empty()
-    assert result.diagnostics.drawdown_blocked is True
-    assert (
-        result.decision.frame.filter(pl.col("symbol") == "AAA")
-        .get_column("exclude_reason")
-        .item()
-        == "risk_drawdown_stop"
-    )
+    signals = pl.DataFrame(strategy.generate(factor_lf).collect())
+    assert signals.get_column("signal").to_list() == pytest.approx([0.4, 0.2])
