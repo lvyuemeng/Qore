@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Mapping
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -14,6 +15,7 @@ from qore_data import DataSettings
 from qore_data.store.schema import DATASETS, Dataset
 
 StoreBackend = Literal["auto", "parquet", "duckdb"]
+StoreFilterValue = str | int | float | bool | date | datetime
 
 _TYPE_PREDICATES = (
     (pa_types.is_date32, pl.Date, "DATE"),
@@ -26,8 +28,8 @@ _TYPE_PREDICATES = (
 
 def _polars_schema(dataset: Dataset) -> dict[str, pl.DataType]:
     mapping: dict[str, pl.DataType] = {}
-    for field in dataset.schema:
-        mapping[field.name] = _polars_type(field.type)
+    for f in dataset.schema:
+        mapping[f.name] = _polars_type(f.type)
     return mapping
 
 
@@ -83,9 +85,9 @@ class QoreStore:
     def read(
         self,
         dataset: str,
-        filters: dict[str, object] | None = None,
+        filters: Mapping[str, StoreFilterValue] | None = None,
         columns: list[str] | None = None,
-        backend: StoreBackend = "auto",
+        backend: str = "auto",
     ) -> pl.LazyFrame:
         dataset_info = self._dataset(dataset)
         schema_names = set(_polars_schema(dataset_info))
@@ -109,7 +111,7 @@ class QoreStore:
     def read_parquet(
         self,
         dataset: str,
-        filters: dict[str, object] | None = None,
+        filters: Mapping[str, StoreFilterValue] | None = None,
         columns: list[str] | None = None,
     ) -> pl.LazyFrame:
         return self.read(dataset, filters=filters, columns=columns, backend="parquet")
@@ -117,22 +119,16 @@ class QoreStore:
     def read_duckdb(
         self,
         dataset: str,
-        filters: dict[str, object] | None = None,
+        filters: Mapping[str, StoreFilterValue] | None = None,
         columns: list[str] | None = None,
     ) -> pl.LazyFrame:
         return self.read(dataset, filters=filters, columns=columns, backend="duckdb")
-
-    def storage_priority(self) -> str:
-        return "parquet"
-
-    def query_priority(self) -> str:
-        return "duckdb"
 
     def _read_parquet(
         self,
         dataset: str,
         dataset_info: Dataset,
-        filters: dict[str, object] | None,
+        filters: Mapping[str, StoreFilterValue] | None,
         columns: list[str] | None,
     ) -> pl.LazyFrame:
         root = self._dataset_root(dataset)
@@ -150,7 +146,7 @@ class QoreStore:
         self,
         dataset: str,
         dataset_info: Dataset,
-        filters: dict[str, object] | None,
+        filters: Mapping[str, StoreFilterValue] | None,
         columns: list[str] | None,
     ) -> pl.LazyFrame:
         root = self._dataset_root(dataset)
@@ -169,27 +165,26 @@ class QoreStore:
         table = self._conn.execute(query, params).to_arrow_table()
         return pl.DataFrame(pl.from_arrow(table)).lazy()
 
-    def _with_partitions(self, dataset: Dataset, df: pl.DataFrame) -> pl.DataFrame:
-        result = df
-        if "year" in dataset.partition_cols and "year" not in result.columns:
-            if "date" in result.columns:
-                result = result.with_columns(pl.col("date").dt.year().alias("year"))
-            elif "announce_date" in result.columns:
-                result = result.with_columns(
-                    pl.col("announce_date").dt.year().alias("year")
-                )
-            elif "report_date" in result.columns:
-                result = result.with_columns(
-                    pl.col("report_date").dt.year().alias("year")
-                )
-        if (
-            "date_month" in dataset.partition_cols
-            and "date_month" not in result.columns
-        ):
-            result = result.with_columns(
-                pl.col("date").dt.strftime("%Y-%m").alias("date_month")
-            )
-        return result
+    _YEAR_SOURCES = ("date", "announce_date", "report_date")
+
+    def _add_partition_columns(
+        self, dataset: Dataset, df: pl.DataFrame
+    ) -> pl.DataFrame:
+        exprs: list[pl.Expr] = []
+        for col in dataset.partition_cols:
+            if col in df.columns:
+                continue
+            if col == "year":
+                exprs.append(self._year_expr(df, col))
+            elif col == "date_month":
+                exprs.append(pl.col("date").dt.strftime("%Y-%m").alias("date_month"))
+        return df.with_columns(exprs) if exprs else df
+
+    def _year_expr(self, df: pl.DataFrame, alias: str) -> pl.Expr:
+        source_col = next((s for s in self._YEAR_SOURCES if s in df.columns), None)
+        if source_col is None:
+            return pl.lit(None).alias(alias)
+        return pl.col(source_col).dt.year().alias(alias)
 
     def write(self, dataset: str, df: pl.DataFrame | pl.LazyFrame) -> None:
         dataset_info = self._dataset(dataset)
@@ -240,7 +235,7 @@ class QoreStore:
         if missing:
             msg = f"Missing columns for {dataset.name}: {missing}"
             raise ValueError(msg)
-        output = self._with_partitions(dataset, df)
+        output = self._add_partition_columns(dataset, df)
         cast_exprs = [
             self._cast_expr(field.name, field.type) for field in dataset.schema
         ]

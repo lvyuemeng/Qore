@@ -9,7 +9,9 @@ dependencies = [
     "httpx[http2]>=0.28",
     "polars>=1.0",
     "pyarrow>=17",
+    "qore-factor",
     "tenacity>=9",
+    "xlrd>=2.0.1",
 ]
 
 [build-system]
