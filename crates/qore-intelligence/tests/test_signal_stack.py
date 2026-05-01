@@ -7,8 +7,8 @@ import polars as pl
 import pytest
 from qore_data import DataSettings
 from qore_data.store.duckdb import QoreStore
-from qore_intelligence.combine import SignalCombiner
 from qore_intelligence import IntelligenceSettings
+from qore_intelligence.combine import SignalCombiner
 from qore_intelligence.signal.llm import LLMExtractor
 from qore_intelligence.signal.score import NewsArticle, NewsPipeline
 from qore_intelligence.signal.triage import Triage
