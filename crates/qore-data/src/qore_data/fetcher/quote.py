@@ -130,7 +130,7 @@ def _kline_chunk_worker(chunk: list[tuple[str, date, date]]) -> list[pl.DataFram
 # ── BaoStock stock_info worker (pickleable) ──────────────────────────────
 
 
-def _stock_info_worker(symbols: Sequence[str]) -> list[dict[str, Any]]:
+def _stock_info_worker(symbols: Sequence[str]) -> pl.DataFrame:
     import baostock as bs
 
     from qore_data.fetcher._base import _suppress_stdout
@@ -138,7 +138,16 @@ def _stock_info_worker(symbols: Sequence[str]) -> list[dict[str, Any]]:
     with _suppress_stdout():
         lg = bs.login()
     if lg.error_code != "0":
-        return []
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.String,
+                "short_name": pl.String,
+                "exchange": pl.String,
+                "industry": pl.String,
+                "board": pl.String,
+                "listing_date": pl.Date,
+            }
+        )
     try:
         rs1 = bs.query_stock_basic()
         basics = {}
@@ -175,7 +184,17 @@ def _stock_info_worker(symbols: Sequence[str]) -> list[dict[str, Any]]:
                     "listing_date": date.fromisoformat(ipo) if ipo else None,
                 }
             )
-        return output
+        return pl.DataFrame(
+            output,
+            schema={
+                "symbol": pl.String,
+                "short_name": pl.String,
+                "exchange": pl.String,
+                "industry": pl.String,
+                "board": pl.String,
+                "listing_date": pl.Date,
+            },
+        )
     finally:
         with _suppress_stdout():
             bs.logout()
@@ -313,8 +332,8 @@ class _BaoStockQuoteSource:
         self, symbols: list[str], as_of: date
     ) -> pl.DataFrame:
         result = await asyncio.to_thread(_stock_info_worker, symbols)
-        if result:
-            return pl.DataFrame(result)
+        if not result.is_empty():
+            return result
         return _empty_frame("stock_profile")
 
     async def close(self) -> None:
