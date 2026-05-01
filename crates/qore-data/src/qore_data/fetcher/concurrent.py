@@ -40,6 +40,15 @@ def _optimal_workers(n_tasks: int) -> int:
     return min(cpu_count, n_tasks)
 
 
+def _chunked[T](items: list[T], size: int) -> list[list[T]]:
+    """Split ``items`` into chunks of at most ``size`` elements.
+
+    Returns a list of chunks (each chunk is a list of items).
+    The last chunk may be shorter.
+    """
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
 def batch_fetch[T](
     config: BatchConfig,
     worker: Any,

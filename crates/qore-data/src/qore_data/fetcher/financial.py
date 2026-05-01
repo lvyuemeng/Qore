@@ -76,10 +76,9 @@ def _query_single(
     return {}
 
 
-def _fundamentals_worker(item: tuple[str, str]) -> pl.DataFrame:
-    """Pickleable worker: (symbol, as_of_iso) -> DataFrame."""
-    symbol, as_of_str = item
-    as_of = date.fromisoformat(as_of_str)
+def _fundamentals_worker(item: tuple[str, date]) -> pl.DataFrame:
+    """Pickleable worker: (symbol, as_of) -> DataFrame."""
+    symbol, as_of = item
     import baostock as bs
 
     from qore_data.fetcher._base import _suppress_stdout
@@ -125,6 +124,63 @@ def _fundamentals_worker(item: tuple[str, str]) -> pl.DataFrame:
         }
         schema_fields.update(dict.fromkeys(_FUNDAMENTALS_SCHEMA, pl.Float64))
         return pl.DataFrame(row, schema=schema_fields)
+    finally:
+        with _suppress_stdout():
+            bs.logout()
+
+
+def _fundamentals_chunk_worker(chunk: list[tuple[str, date]]) -> list[pl.DataFrame]:
+    """Process multiple symbols in a single BaoStock login session."""
+    import baostock as bs
+
+    from qore_data.fetcher._base import _suppress_stdout
+
+    with _suppress_stdout():
+        lg = bs.login()
+    if lg.error_code != "0":
+        return [_empty_fundamentals()] * len(chunk)
+    try:
+        results: list[pl.DataFrame] = []
+        for symbol, as_of in chunk:
+            year, quarter = _latest_report_quarter(as_of)
+            code = _symbol_digits(symbol)
+            exchange = _exchange_from_stock_code(code)
+            bs_code = f"{exchange.lower()}.{code}"
+
+            profit = _query_single(bs, "query_profit_data", bs_code, year, quarter)
+            operation = _query_single(
+                bs, "query_operation_data", bs_code, year, quarter
+            )
+            growth = _query_single(bs, "query_growth_data", bs_code, year, quarter)
+            balance = _query_single(bs, "query_balance_data", bs_code, year, quarter)
+            cashflow = _query_single(bs, "query_cash_flow_data", bs_code, year, quarter)
+            dupont = _query_single(bs, "query_dupont_data", bs_code, year, quarter)
+
+            br = _stock_basic_map_single(bs)
+            st = br.get(f"{exchange.lower()}.{code}") or br.get(code)
+
+            row = _assemble_fundamentals_row(
+                symbol,
+                year,
+                quarter,
+                profit,
+                operation,
+                growth,
+                balance,
+                cashflow,
+                dupont,
+                st,
+            )
+
+            schema_fields: dict[str, Any] = {
+                "report_date": pl.Date,
+                "announce_date": pl.Date,
+                "symbol": pl.String,
+                "is_st": pl.Boolean,
+            }
+            schema_fields.update(dict.fromkeys(_FUNDAMENTALS_SCHEMA, pl.Float64))
+            results.append(pl.DataFrame(row, schema=schema_fields))
+        return results
     finally:
         with _suppress_stdout():
             bs.logout()
@@ -283,19 +339,20 @@ def _empty_fundamentals() -> pl.DataFrame:
 
 class _BaoStockFinancialSource:
     async def fundamentals(self, symbol: str, as_of: date) -> pl.DataFrame:
-        result = await asyncio.to_thread(
-            _fundamentals_worker, (symbol, as_of.isoformat())
-        )
+        result = await asyncio.to_thread(_fundamentals_worker, (symbol, as_of))
         return result
 
     async def batch_fundamentals(
         self, symbols: list[str], as_of: date
     ) -> list[pl.DataFrame]:
-        items = [(s, as_of.isoformat()) for s in symbols]
-        results = await asyncio.to_thread(
-            batch_fetch, BatchConfig.process(), _fundamentals_worker, items
+        from qore_data.fetcher.concurrent import _chunked
+
+        items = [(s, as_of) for s in symbols]
+        chunks = _chunked(items, 50)
+        chunk_results = await asyncio.to_thread(
+            batch_fetch, BatchConfig.process(), _fundamentals_chunk_worker, chunks
         )
-        return results
+        return [r for cr in chunk_results for r in cr]
 
     async def close(self) -> None:
         pass

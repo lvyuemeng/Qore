@@ -44,11 +44,13 @@ from qore_data.fetcher.xueqiu import (
 # ── BaoStock kline worker (pickleable for ProcessPoolExecutor) ────────────
 
 
-def _kline_worker(symbol: str, start: str, end: str) -> pl.DataFrame:
+def _kline_worker(symbol: str, start: date, end: date) -> pl.DataFrame:
     import baostock as bs
 
     from qore_data.fetcher._base import _suppress_stdout
 
+    s = start.isoformat()
+    e = end.isoformat()
     with _suppress_stdout():
         lg = bs.login()
     if lg.error_code != "0":
@@ -59,8 +61,8 @@ def _kline_worker(symbol: str, start: str, end: str) -> pl.DataFrame:
         rs = bs.query_history_k_data_plus(
             bs_code,
             "date,code,open,high,low,close,volume,amount,tradestatus,pctChg",
-            start,
-            end,
+            s,
+            e,
             "d",
             "2",
         )
@@ -78,9 +80,51 @@ def _kline_worker(symbol: str, start: str, end: str) -> pl.DataFrame:
             bs.logout()
 
 
-def _kline_batch_worker(item: tuple[str, str, str]) -> pl.DataFrame:
+def _kline_batch_worker(item: tuple[str, date, date]) -> pl.DataFrame:
     symbol, start, end = item
     return _kline_worker(symbol, start, end)
+
+
+def _kline_chunk_worker(chunk: list[tuple[str, date, date]]) -> list[pl.DataFrame]:
+    """Process multiple symbols in a single BaoStock login session."""
+    import baostock as bs
+
+    from qore_data.fetcher._base import _suppress_stdout
+
+    with _suppress_stdout():
+        lg = bs.login()
+    if lg.error_code != "0":
+        return [pl.DataFrame()] * len(chunk)
+    try:
+        results: list[pl.DataFrame] = []
+        for symbol, start, end in chunk:
+            s = start.isoformat()
+            e = end.isoformat()
+            code, exchange = symbol.upper().split(".", maxsplit=1)
+            bs_code = f"{exchange.lower()}.{code}"
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                "date,code,open,high,low,close,volume,amount,tradestatus,pctChg",
+                s,
+                e,
+                "d",
+                "2",
+            )
+            if rs is None or rs.error_code != "0":
+                results.append(pl.DataFrame())
+                continue
+            fields = getattr(rs, "fields", None)
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+            if not fields or not rows:
+                results.append(pl.DataFrame())
+            else:
+                results.append(pl.DataFrame(rows, schema=fields, orient="row"))
+        return results
+    finally:
+        with _suppress_stdout():
+            bs.logout()
 
 
 # ── BaoStock stock_info worker (pickleable) ──────────────────────────────
@@ -173,9 +217,7 @@ class CapitalFlowSource(Protocol):
 
 class _BaoStockQuoteSource:
     async def stock_daily(self, symbol: str, start: date, end: date) -> pl.DataFrame:
-        result = await asyncio.to_thread(
-            _kline_worker, symbol, start.isoformat(), end.isoformat()
-        )
+        result = await asyncio.to_thread(_kline_worker, symbol, start, end)
         if result.is_empty():
             return _empty_frame("stock_daily")
         return (
@@ -215,12 +257,16 @@ class _BaoStockQuoteSource:
     async def batch_stock_daily(
         self, symbols: list[str], start: date, end: date
     ) -> list[pl.DataFrame]:
-        items = [(s, start.isoformat(), end.isoformat()) for s in symbols]
-        results = await asyncio.to_thread(
-            batch_fetch, BatchConfig.process(), _kline_batch_worker, items
+        from qore_data.fetcher.concurrent import _chunked
+
+        items = [(s, start, end) for s in symbols]
+        chunks = _chunked(items, 50)
+        chunk_results = await asyncio.to_thread(
+            batch_fetch, BatchConfig.process(), _kline_chunk_worker, chunks
         )
+        flat = [r for cr in chunk_results for r in cr]
         parsed: list[pl.DataFrame] = []
-        for sym, raw in zip(symbols, results, strict=False):
+        for sym, raw in zip(symbols, flat, strict=False):
             if raw.is_empty():
                 parsed.append(_empty_frame("stock_daily"))
             else:
