@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
 import random
 from collections.abc import Callable
 from datetime import date
@@ -382,6 +384,20 @@ class _BaoStockSessionError(RuntimeError):
     pass
 
 
+@contextlib.contextmanager
+def _suppress_stdout():
+    """Suppress stdout for the duration of the block (BaoStock SDK prints to stdout)."""
+    old_stdout = os.dup(1)
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 1)
+    os.close(devnull)
+    try:
+        yield
+    finally:
+        os.dup2(old_stdout, 1)
+        os.close(old_stdout)
+
+
 class _BaoStockSession:
     """Context manager for BaoStock login/logout in single-sync paths.
 
@@ -391,7 +407,8 @@ class _BaoStockSession:
     def __enter__(self):
         import baostock as bs
 
-        lg = bs.login()
+        with _suppress_stdout():
+            lg = bs.login()
         if lg.error_code != "0":
             raise _BaoStockSessionError(f"BaoStock login failed: {lg.error_msg}")
         return self
@@ -399,7 +416,8 @@ class _BaoStockSession:
     def __exit__(self, *args):
         import baostock as bs
 
-        bs.logout()
+        with _suppress_stdout():
+            bs.logout()
         return False
 
 

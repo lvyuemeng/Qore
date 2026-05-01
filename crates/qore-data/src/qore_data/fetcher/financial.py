@@ -82,7 +82,10 @@ def _fundamentals_worker(item: tuple[str, str]) -> pl.DataFrame:
     as_of = date.fromisoformat(as_of_str)
     import baostock as bs
 
-    lg = bs.login()
+    from qore_data.fetcher._base import _suppress_stdout
+
+    with _suppress_stdout():
+        lg = bs.login()
     if lg.error_code != "0":
         return _empty_fundamentals()
     try:
@@ -123,7 +126,8 @@ def _fundamentals_worker(item: tuple[str, str]) -> pl.DataFrame:
         schema_fields.update(dict.fromkeys(_FUNDAMENTALS_SCHEMA, pl.Float64))
         return pl.DataFrame(row, schema=schema_fields)
     finally:
-        bs.logout()
+        with _suppress_stdout():
+            bs.logout()
 
 
 def _stock_basic_map_single(bs):

@@ -47,6 +47,8 @@ _CSI_CODE_COLUMNS = (
 def _constituents_worker(index_symbol: str) -> pl.Series:
     import baostock as bs
 
+    from qore_data.fetcher._base import _suppress_stdout
+
     code_map = {
         "000016": "query_sz50_stocks",
         "000300": "query_hs300_stocks",
@@ -58,7 +60,8 @@ def _constituents_worker(index_symbol: str) -> pl.Series:
     if not method_name:
         return pl.Series("symbol", [], dtype=pl.String)
 
-    lg = bs.login()
+    with _suppress_stdout():
+        lg = bs.login()
     if lg.error_code != "0":
         return pl.Series("symbol", [], dtype=pl.String)
     try:
@@ -81,7 +84,8 @@ def _constituents_worker(index_symbol: str) -> pl.Series:
         ]
         return pl.Series("symbol", codes, dtype=pl.String)
     finally:
-        bs.logout()
+        with _suppress_stdout():
+            bs.logout()
 
 
 @dataclass(frozen=True, slots=True)

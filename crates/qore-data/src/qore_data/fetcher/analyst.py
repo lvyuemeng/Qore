@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Any
 
@@ -24,23 +25,28 @@ _XQ_EARN_URL = "https://stock.xueqiu.com/v5/stock/finance/cn/earningforecast.jso
 
 
 class _XueqiuAnalystSource:
+    MAX_CONCURRENT = 20
+
     def __init__(self, session: _XueqiuSession) -> None:
         self._session = session
 
     async def batch_analyst_forecasts(
         self, symbols: list[str], as_of: date
     ) -> pl.DataFrame:
-        rows: list[dict[str, Any]] = []
-        for sym in symbols:
-            try:
-                data = await self._session.get_json(
-                    _XQ_EARN_URL, {"symbol": _xq_symbol(sym), "count": "6"}
-                )
-            except Exception:
-                continue
+        sem = asyncio.Semaphore(self.MAX_CONCURRENT)
+
+        async def _fetch_one(sym: str) -> dict[str, Any] | None:
+            async with sem:
+                try:
+                    data = await self._session.get_json(
+                        _XQ_EARN_URL,
+                        {"symbol": _xq_symbol(sym), "count": "6"},
+                    )
+                except Exception:
+                    return None
             items = (data.get("data") or {}).get("list") or []
             if not items:
-                continue
+                return None
             eps_by_year: dict[str, float | None] = {}
             org_count = 0
             for item in items:
@@ -50,9 +56,8 @@ class _XueqiuAnalystSource:
                 oc = item.get("org_num") or 0
                 if oc > org_count:
                     org_count = oc
-
             now = as_of.year
-            row: dict[str, Any] = {
+            return {
                 "as_of": as_of,
                 "symbol": sym,
                 "report_count": org_count,
@@ -66,8 +71,9 @@ class _XueqiuAnalystSource:
                 "eps_year3": eps_by_year.get(str(now + 2)),
                 "eps_year4": eps_by_year.get(str(now + 3)),
             }
-            rows.append(row)
 
+        results = await asyncio.gather(*(_fetch_one(sym) for sym in symbols))
+        rows = [r for r in results if r is not None]
         if rows:
             return _frame_from_records(
                 rows,

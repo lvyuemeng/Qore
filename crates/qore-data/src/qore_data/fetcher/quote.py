@@ -47,7 +47,10 @@ from qore_data.fetcher.xueqiu import (
 def _kline_worker(symbol: str, start: str, end: str) -> pl.DataFrame:
     import baostock as bs
 
-    lg = bs.login()
+    from qore_data.fetcher._base import _suppress_stdout
+
+    with _suppress_stdout():
+        lg = bs.login()
     if lg.error_code != "0":
         return pl.DataFrame()
     try:
@@ -71,7 +74,8 @@ def _kline_worker(symbol: str, start: str, end: str) -> pl.DataFrame:
             return pl.DataFrame()
         return pl.DataFrame(rows, schema=fields, orient="row")
     finally:
-        bs.logout()
+        with _suppress_stdout():
+            bs.logout()
 
 
 def _kline_batch_worker(item: tuple[str, str, str]) -> pl.DataFrame:
@@ -85,7 +89,10 @@ def _kline_batch_worker(item: tuple[str, str, str]) -> pl.DataFrame:
 def _stock_info_worker(symbols: Sequence[str]) -> list[dict[str, Any]]:
     import baostock as bs
 
-    lg = bs.login()
+    from qore_data.fetcher._base import _suppress_stdout
+
+    with _suppress_stdout():
+        lg = bs.login()
     if lg.error_code != "0":
         return []
     try:
@@ -126,7 +133,8 @@ def _stock_info_worker(symbols: Sequence[str]) -> list[dict[str, Any]]:
             )
         return output
     finally:
-        bs.logout()
+        with _suppress_stdout():
+            bs.logout()
 
 
 # ── source protocols ────────────────────────────────────────────────────
