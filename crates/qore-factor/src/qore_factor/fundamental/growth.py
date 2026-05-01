@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import polars as pl
 
@@ -8,40 +8,22 @@ from qore_factor.base import FundamentalFactor
 
 
 @dataclass(slots=True)
-class RevenueGrowthFactor(FundamentalFactor):
-    name: str = "revenue_growth_yoy"
-    produces: str = "revenue_growth_yoy"
-    requires: frozenset[str] = frozenset({"revenue_growth_yoy"})
-
-    def compute(self, lf: pl.LazyFrame) -> pl.LazyFrame:
-        return lf.with_columns(
-            pl.col("revenue_growth_yoy").cast(pl.Float64).alias(self.produces)
-        )
-
-
-@dataclass(slots=True)
-class NetProfitGrowthFactor(FundamentalFactor):
-    name: str = "net_profit_growth_yoy"
-    produces: str = "net_profit_growth_yoy"
-    requires: frozenset[str] = frozenset({"net_profit_growth_yoy"})
-
-    def compute(self, lf: pl.LazyFrame) -> pl.LazyFrame:
-        return lf.with_columns(
-            pl.col("net_profit_growth_yoy").cast(pl.Float64).alias(self.produces)
-        )
-
-
-@dataclass(slots=True)
 class ProfitGrowthPremiumFactor(FundamentalFactor):
+    net_profit_growth_column: str = "net_profit_yoy"
+    revenue_growth_column: str = "revenue_growth_yoy"
     name: str = "profit_growth_premium"
     produces: str = "profit_growth_premium"
-    requires: frozenset[str] = frozenset(
-        {"net_profit_growth_yoy", "revenue_growth_yoy"}
-    )
+    requires: frozenset[str] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.requires = frozenset(
+            {self.net_profit_growth_column, self.revenue_growth_column}
+        )
 
     def compute(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         return lf.with_columns(
-            (pl.col("net_profit_growth_yoy") - pl.col("revenue_growth_yoy")).alias(
-                self.produces
-            )
+            (
+                pl.col(self.net_profit_growth_column)
+                - pl.col(self.revenue_growth_column)
+            ).alias(self.produces)
         )

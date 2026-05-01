@@ -9,18 +9,20 @@ from qore_factor.base import Factor, OHLCVFactor
 
 @dataclass(slots=True)
 class AverageAmountFactor(OHLCVFactor):
+    amount_column: str = "amount"
     window: int = 20
     name: str = field(init=False)
     produces: str = field(init=False)
-    requires: frozenset[str] = frozenset({"symbol", "amount"})
+    requires: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
         self.name = f"average_amount_{self.window}d"
         self.produces = f"avg_amount_{self.window}d"
+        self.requires = frozenset({"symbol", self.amount_column})
 
     def compute(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         return lf.with_columns(
-            pl.col("amount")
+            pl.col(self.amount_column)
             .rolling_mean(self.window)
             .over("symbol")
             .alias(self.produces)
@@ -29,18 +31,20 @@ class AverageAmountFactor(OHLCVFactor):
 
 @dataclass(slots=True)
 class MinimumAmountFactor(OHLCVFactor):
+    amount_column: str = "amount"
     window: int = 20
     name: str = field(init=False)
     produces: str = field(init=False)
-    requires: frozenset[str] = frozenset({"symbol", "amount"})
+    requires: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
         self.name = f"minimum_amount_{self.window}d"
         self.produces = f"min_amount_{self.window}d"
+        self.requires = frozenset({"symbol", self.amount_column})
 
     def compute(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         return lf.with_columns(
-            pl.col("amount")
+            pl.col(self.amount_column)
             .rolling_min(self.window)
             .over("symbol")
             .alias(self.produces)

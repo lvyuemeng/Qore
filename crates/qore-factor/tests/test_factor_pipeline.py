@@ -5,22 +5,13 @@ from datetime import date
 import polars as pl
 import pytest
 from qore_factor.event.alert import AlertCondition, AlertRule, build_alert_frame
-from qore_factor.event.audit import (
-    ActiveAuditExclusionFactor,
-    AdverseAuditOpinionAgeFactor,
-    AdverseAuditOpinionFlagFactor,
-)
-from qore_factor.fundamental.growth import (
-    NetProfitGrowthFactor,
-    ProfitGrowthPremiumFactor,
-    RevenueGrowthFactor,
-)
+from qore_factor.fundamental.growth import ProfitGrowthPremiumFactor
 from qore_factor.fundamental.quality import (
     AccrualRatioFactor,
     AssetTurnoverFactor,
     CFOYieldFactor,
     DebtToAssetRatioFactor,
-    GrossMarginFactor,
+    ROEStabilityFactor,
 )
 from qore_factor.fundamental.value import BookToPriceFactor
 from qore_factor.ohlcv.liquidity import (
@@ -73,7 +64,7 @@ def test_pipeline_normalizes_cross_sectionally() -> None:
         }
     ).lazy()
 
-    pipeline = FactorPipeline().add(BookToPriceFactor()).normalize(method="zscore")
+    pipeline = FactorPipeline(normalize="zscore").add(BookToPriceFactor())
     result = _collect_dataframe(pipeline.run(lf))
 
     assert "bp_z" in result.columns
@@ -198,16 +189,14 @@ def test_pipeline_adds_fundamental_quality_factors() -> None:
             "date": [date(2026, 3, 31), date(2026, 3, 31)],
             "symbol": ["AAA", "BBB"],
             "revenue": [100.0, 200.0],
-            "gross_margin": [0.35, 0.20],
             "total_assets": [400.0, 500.0],
         }
     ).lazy()
 
     result = _collect_dataframe(
-        FactorPipeline().add(GrossMarginFactor(), AssetTurnoverFactor()).run(lf)
+        FactorPipeline().add(AssetTurnoverFactor()).run(lf)
     ).sort("symbol")
 
-    assert result.get_column("gross_margin").to_list() == [0.35, 0.20]
     assert result.get_column("asset_turnover").to_list() == pytest.approx([0.25, 0.4])
 
 
@@ -216,7 +205,7 @@ def test_pipeline_adds_fundamental_cashflow_factors() -> None:
         {
             "date": [date(2026, 3, 31), date(2026, 3, 31)],
             "symbol": ["AAA", "BBB"],
-            "cfo": [80.0, 60.0],
+            "operating_cashflow": [80.0, 60.0],
             "net_income": [100.0, 50.0],
             "total_assets": [400.0, 200.0],
         }
@@ -250,37 +239,25 @@ def test_pipeline_adds_debt_to_asset_ratio_factor() -> None:
     assert result.row(2, named=True)["debt_to_asset_ratio"] is None
 
 
-def test_pipeline_adds_audit_event_factors() -> None:
+def test_debt_to_asset_ratio_factor_supports_alias_configuration() -> None:
     lf = pl.DataFrame(
         {
-            "date": [date(2026, 4, 19), date(2026, 4, 19), date(2026, 4, 19)],
-            "symbol": ["AAA", "BBB", "CCC"],
-            "has_adverse_audit_opinion": [True, False, None],
-            "active_audit_exclusion": [True, False, None],
-            "adverse_audit_opinion_age_days": [10, 250, None],
+            "symbol": ["AAA", "BBB"],
+            "liabilities": [30.0, 40.0],
+            "assets": [100.0, 80.0],
         }
     ).lazy()
 
-    result = _collect_dataframe(
-        FactorPipeline()
-        .add(
-            AdverseAuditOpinionFlagFactor(),
-            ActiveAuditExclusionFactor(),
-            AdverseAuditOpinionAgeFactor(),
-        )
-        .run(lf)
-    ).sort("symbol")
+    factor = DebtToAssetRatioFactor(
+        liabilities_column="liabilities",
+        assets_column="assets",
+        produces="leverage_ratio",
+        name="leverage_ratio",
+    )
+    result = _collect_dataframe(FactorPipeline().add(factor).run(lf)).sort("symbol")
 
-    assert result.get_column("has_adverse_audit_opinion").to_list() == pytest.approx(
-        [1.0, 0.0, 0.0]
-    )
-    assert result.get_column("active_audit_exclusion").to_list() == pytest.approx(
-        [1.0, 0.0, 0.0]
-    )
-    assert result.get_column("adverse_audit_opinion_age_days").to_list()[
-        :2
-    ] == pytest.approx([10.0, 250.0])
-    assert result.row(2, named=True)["adverse_audit_opinion_age_days"] is None
+    assert factor.requires == frozenset({"liabilities", "assets"})
+    assert result.get_column("leverage_ratio").to_list() == pytest.approx([0.3, 0.5])
 
 
 def test_build_alert_frame_from_generic_conditions() -> None:
@@ -344,19 +321,14 @@ def test_pipeline_adds_fundamental_growth_factors() -> None:
     result = _collect_dataframe(
         FactorPipeline()
         .add(
-            RevenueGrowthFactor(),
-            NetProfitGrowthFactor(),
-            ProfitGrowthPremiumFactor(),
+            ProfitGrowthPremiumFactor(
+                net_profit_growth_column="net_profit_growth_yoy",
+                revenue_growth_column="revenue_growth_yoy",
+            ),
         )
         .run(lf)
     ).sort("symbol")
 
-    assert result.get_column("revenue_growth_yoy").to_list() == pytest.approx(
-        [0.10, 0.05]
-    )
-    assert result.get_column("net_profit_growth_yoy").to_list() == pytest.approx(
-        [0.18, 0.02]
-    )
     assert result.get_column("profit_growth_premium").to_list() == pytest.approx(
         [0.08, -0.03]
     )
@@ -403,6 +375,63 @@ def test_pipeline_evaluates_ic_metrics() -> None:
     assert metrics.get_column("horizon").to_list() == [1]
     assert metrics.get_column("ic_mean").to_list() == [1.0]
     assert metrics.get_column("observations").to_list() == [2]
+
+
+def test_roe_stability_factor() -> None:
+    lf = pl.DataFrame(
+        {
+            "date": [
+                date(2026, 1, 1),
+                date(2026, 1, 2),
+                date(2026, 1, 3),
+                date(2026, 1, 4),
+                date(2026, 1, 1),
+                date(2026, 1, 2),
+                date(2026, 1, 3),
+                date(2026, 1, 4),
+            ],
+            "symbol": ["AAA", "AAA", "AAA", "AAA", "BBB", "BBB", "BBB", "BBB"],
+            "roe": [0.15, 0.12, 0.13, 0.14, 0.10, 0.08, 0.09, 0.11],
+        }
+    ).lazy()
+
+    result = _collect_dataframe(
+        FactorPipeline().add(ROEStabilityFactor(window=3)).run(lf)
+    ).sort(["symbol", "date"])
+
+    assert "roe_stability" in result.columns
+    stable_aaa = result.filter(pl.col("symbol") == "AAA").get_column("roe_stability")
+    assert stable_aaa[0] is None
+    assert stable_aaa[3] > 0
+    stable_bbb = result.filter(pl.col("symbol") == "BBB").get_column("roe_stability")
+    assert stable_bbb[3] > 0
+
+
+def test_pipeline_neutralizes_cross_sectionally() -> None:
+    lf = pl.DataFrame(
+        {
+            "date": [
+                date(2026, 1, 1),
+                date(2026, 1, 1),
+                date(2026, 1, 2),
+                date(2026, 1, 2),
+            ],
+            "symbol": ["AAA", "BBB", "AAA", "BBB"],
+            "industry": ["Bank", "Tech", "Bank", "Tech"],
+            "pb": [2.0, 1.0, 4.0, 2.0],
+        }
+    ).lazy()
+
+    result = _collect_dataframe(
+        FactorPipeline(neutralize_by=["date", "industry"])
+        .add(BookToPriceFactor())
+        .run(lf)
+    )
+
+    assert "bp" in result.columns
+    assert result.get_column("bp").to_list() == pytest.approx(
+        [0.0, 0.0, 0.0, 0.0], abs=1e-8
+    )
 
 
 def _collect_dataframe(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:

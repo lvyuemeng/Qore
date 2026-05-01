@@ -8,37 +8,33 @@ import polars as pl
 from qore_factor.base import Factor
 
 NormalizeMethod = Literal["zscore", "rank_pct"]
+EVALUATION_SCHEMA: dict[str, pl.DataType] = {
+    "signal_key": pl.String(),
+    "horizon": pl.Int64(),
+    "ic_mean": pl.Float64(),
+    "ic_std": pl.Float64(),
+    "icir": pl.Float64(),
+    "observations": pl.Int64(),
+}
 
 
 @dataclass(slots=True)
 class FactorPipeline:
     factors: list[Factor] = field(default_factory=list)
-    _normalize_method: NormalizeMethod | None = None
-    _normalize_group_by: list[str] = field(default_factory=lambda: ["date"])
-    _neutralize_by: list[str] = field(default_factory=list)
+    normalize: NormalizeMethod | None = None
+    normalize_group_by: list[str] = field(default_factory=lambda: ["date"])
+    neutralize_by: list[str] = field(default_factory=list)
 
     def add(self, *factors: Factor) -> FactorPipeline:
         self.factors.extend(factors)
         return self
 
-    def normalize(
-        self,
-        method: NormalizeMethod = "zscore",
-        group_by: list[str] = ["date"],  # noqa: B006
-    ) -> FactorPipeline:
-        self._normalize_method = method
-        self._normalize_group_by = list(group_by)
-        return self
-
-    def neutralize(self, by: list[str]) -> FactorPipeline:
-        self._neutralize_by = by
-        return self
-
     def run(self, lf: pl.LazyFrame) -> pl.LazyFrame:
         available = set(lf.collect_schema().names())
         computed: list[str] = []
+        factors = self.factors
 
-        for factor in self.factors:
+        for factor in factors:
             missing = sorted(factor.requires - available)
             if missing:
                 msg = f"Factor '{factor.name}' missing required columns: {missing}"
@@ -47,10 +43,10 @@ class FactorPipeline:
             available.add(factor.produces)
             computed.append(factor.produces)
 
-        if self._neutralize_by:
+        if self.neutralize_by:
             lf = self._apply_neutralization(lf, computed)
 
-        if self._normalize_method is not None:
+        if self.normalize is not None:
             lf = self._apply_normalization(lf, computed)
 
         return lf
@@ -63,16 +59,16 @@ class FactorPipeline:
     ) -> pl.DataFrame:
         factor_columns = [factor.produces for factor in self.factors]
         if not factor_columns or not horizons:
-            return pl.DataFrame(
-                schema={
-                    "signal_key": pl.String,
-                    "horizon": pl.Int64,
-                    "ic_mean": pl.Float64,
-                    "ic_std": pl.Float64,
-                    "icir": pl.Float64,
-                    "observations": pl.Int64,
-                }
-            )
+            return pl.DataFrame(schema=EVALUATION_SCHEMA)
+
+        required_return_columns = [f"forward_return_{horizon}d" for horizon in horizons]
+        forward_schema = set(forward_returns.collect_schema().names())
+        missing_returns = [
+            column for column in required_return_columns if column not in forward_schema
+        ]
+        if missing_returns:
+            msg = f"Missing forward return columns: {missing_returns}"
+            raise ValueError(msg)
 
         factor_frame = self.run(factor_lf).select("date", "symbol", *factor_columns)
         joined = factor_frame.join(
@@ -80,47 +76,61 @@ class FactorPipeline:
             on=["date", "symbol"],
             how="inner",
         )
+        metric_specs = [
+            (signal_key, horizon, f"__ic__{signal_key}__{horizon}")
+            for signal_key in factor_columns
+            for horizon in horizons
+        ]
+        daily_ic = pl.DataFrame(
+            joined.group_by("date")
+            .agg(
+                [
+                    pl.corr(
+                        pl.col(signal_key).cast(pl.Float64),
+                        pl.col(f"forward_return_{horizon}d").cast(pl.Float64),
+                    ).alias(alias)
+                    for signal_key, horizon, alias in metric_specs
+                ]
+            )
+            .collect()
+        )
+        if daily_ic.is_empty():
+            return pl.DataFrame(schema=EVALUATION_SCHEMA)
 
-        metric_frames: list[pl.DataFrame] = []
-        for signal_key in factor_columns:
-            for horizon in horizons:
-                return_column = f"forward_return_{horizon}d"
-                if return_column not in joined.collect_schema().names():
-                    msg = f"Missing forward return column: {return_column}"
-                    raise ValueError(msg)
+        signal_keys: list[str] = []
+        horizon_values: list[int] = []
+        ic_means: list[float | None] = []
+        ic_stds: list[float | None] = []
+        icirs: list[float | None] = []
+        observations: list[int] = []
+        for signal_key, horizon, alias in metric_specs:
+            series = daily_ic.get_column(alias).drop_nulls()
+            ic_mean = series.mean()
+            ic_std = series.std()
+            ic_mean_value = float(ic_mean) if isinstance(ic_mean, int | float) else None
+            ic_std_value = float(ic_std) if isinstance(ic_std, int | float) else None
+            signal_keys.append(signal_key)
+            horizon_values.append(horizon)
+            ic_means.append(ic_mean_value)
+            ic_stds.append(ic_std_value)
+            icirs.append(
+                None
+                if ic_mean_value is None or ic_std_value in (None, 0.0)
+                else ic_mean_value / ic_std_value
+            )
+            observations.append(series.len())
 
-                daily_ic = pl.DataFrame(
-                    joined.select(
-                        "date",
-                        pl.col(signal_key).cast(pl.Float64).alias("factor_value"),
-                        pl.col(return_column).cast(pl.Float64).alias("forward_return"),
-                    )
-                    .filter(
-                        pl.col("factor_value").is_not_null()
-                        & pl.col("forward_return").is_not_null()
-                    )
-                    .group_by("date")
-                    .agg(pl.corr("factor_value", "forward_return").alias("ic"))
-                    .filter(pl.col("ic").is_not_null())
-                    .collect()
-                )
-
-                metric_frames.append(
-                    pl.DataFrame(
-                        [
-                            {
-                                "signal_key": signal_key,
-                                "horizon": horizon,
-                                "ic_mean": _series_stat(daily_ic, "mean"),
-                                "ic_std": _series_stat(daily_ic, "std"),
-                                "icir": _icir(daily_ic),
-                                "observations": daily_ic.height,
-                            }
-                        ]
-                    )
-                )
-
-        return pl.concat(metric_frames, how="vertical")
+        return pl.DataFrame(
+            {
+                "signal_key": signal_keys,
+                "horizon": horizon_values,
+                "ic_mean": ic_means,
+                "ic_std": ic_stds,
+                "icir": icirs,
+                "observations": observations,
+            },
+            schema=EVALUATION_SCHEMA,
+        )
 
     def _apply_neutralization(
         self,
@@ -131,7 +141,7 @@ class FactorPipeline:
             return lf
 
         expressions = [
-            (pl.col(column) - pl.col(column).mean().over(self._neutralize_by)).alias(
+            (pl.col(column) - pl.col(column).mean().over(self.neutralize_by)).alias(
                 column
             )
             for column in factor_columns
@@ -146,41 +156,27 @@ class FactorPipeline:
         if not factor_columns:
             return lf
 
-        if self._normalize_method == "zscore":
-            expressions = []
-            for column in factor_columns:
-                mean = pl.col(column).mean().over(self._normalize_group_by)
-                std = pl.col(column).std().over(self._normalize_group_by)
-                expressions.append(
-                    ((pl.col(column) - mean) / (std + 1e-8)).alias(f"{column}_z")
-                )
-            return lf.with_columns(expressions)
-
-        if self._normalize_method == "rank_pct":
+        if self.normalize == "zscore":
+            group_by = self.normalize_group_by
             expressions = [
                 (
-                    pl.col(column).rank(method="average").over(self._normalize_group_by)
-                    / pl.len().over(self._normalize_group_by)
+                    (pl.col(column) - pl.col(column).mean().over(group_by))
+                    / (pl.col(column).std().over(group_by) + 1e-8)
+                ).alias(f"{column}_z")
+                for column in factor_columns
+            ]
+            return lf.with_columns(expressions)
+
+        if self.normalize == "rank_pct":
+            group_by = self.normalize_group_by
+            expressions = [
+                (
+                    pl.col(column).rank(method="average").over(group_by)
+                    / pl.len().over(group_by)
                 ).alias(f"{column}_rank_pct")
                 for column in factor_columns
             ]
             return lf.with_columns(expressions)
 
-        msg = f"Unsupported normalization method: {self._normalize_method}"
+        msg = f"Unsupported normalization method: {self.normalize}"
         raise ValueError(msg)
-
-
-def _series_stat(frame: pl.DataFrame, stat: Literal["mean", "std"]) -> float | None:
-    if frame.is_empty():
-        return None
-    series = frame.get_column("ic")
-    value = series.mean() if stat == "mean" else series.std()
-    return float(value) if isinstance(value, (int, float)) else None
-
-
-def _icir(frame: pl.DataFrame) -> float | None:
-    ic_mean = _series_stat(frame, "mean")
-    ic_std = _series_stat(frame, "std")
-    if ic_mean is None or ic_std in (None, 0.0):
-        return None
-    return ic_mean / ic_std
