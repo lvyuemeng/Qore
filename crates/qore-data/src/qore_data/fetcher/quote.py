@@ -15,12 +15,6 @@ import httpx
 import polars as pl
 
 from qore_data.fetcher._base import (
-    _CAPITAL_FLOW_URL,
-    _CLIST_URL,
-    _PUSH2HIS_URL,
-    _UT_CAPITAL_FLOW,
-    _UT_CLIST,
-    _UT_KLINE,
     _board_from_code,
     _empty_frame,
     _exchange_from_stock_code,
@@ -33,7 +27,15 @@ from qore_data.fetcher._base import (
     _to_int,
 )
 from qore_data.fetcher.concurrent import BatchConfig, batch_fetch
-from qore_data.fetcher.http import RequestSpec
+from qore_data.fetcher.eastmoney import (
+    _CAPITAL_FLOW_URL,
+    _CLIST_URL,
+    _PUSH2HIS_URL,
+    _UT_CAPITAL_FLOW,
+    _UT_CLIST,
+    _UT_KLINE,
+    RequestSpec,
+)
 from qore_data.fetcher.xueqiu import (
     _kline_timestamp,
     _ts_to_date,
@@ -710,7 +712,7 @@ class QuoteFetcher:
 
     @classmethod
     def from_settings(cls, settings) -> QuoteFetcher:
-        from qore_data.fetcher._base import build_json_fetcher
+        from qore_data.fetcher.eastmoney import build_json_fetcher
 
         return cls(build_json_fetcher(settings))
 

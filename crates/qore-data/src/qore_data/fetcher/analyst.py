@@ -7,15 +7,17 @@ from typing import Any
 import polars as pl
 
 from qore_data.fetcher._base import (
-    _FINANCIAL_URL,
-    BaseJsonFetcher,
     _extract_code,
     _frame_from_records,
     _symbol_digits,
     _to_float,
     _to_int,
 )
-from qore_data.fetcher.http import RequestSpec
+from qore_data.fetcher.eastmoney import (
+    _FINANCIAL_URL,
+    BaseJsonFetcher,
+    RequestSpec,
+)
 from qore_data.fetcher.xueqiu import _xq_symbol, _XueqiuSession
 
 # ── Xueqiu analyst source (fallback, EPS-only) ──────────────────────────

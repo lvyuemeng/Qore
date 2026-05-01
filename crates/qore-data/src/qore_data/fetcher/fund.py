@@ -6,12 +6,14 @@ from typing import Any
 import polars as pl
 
 from qore_data.fetcher._base import (
-    _FINANCIAL_URL,
-    _FUND_NAV_URL,
-    BaseJsonFetcher,
     _frame_from_rows,
     _page_records,
     _to_float,
+)
+from qore_data.fetcher.eastmoney import (
+    _FINANCIAL_URL,
+    _FUND_NAV_URL,
+    BaseJsonFetcher,
 )
 from qore_data.fetcher.xueqiu import _xq_symbol, _XueqiuSession
 

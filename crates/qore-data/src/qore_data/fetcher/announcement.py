@@ -9,11 +9,13 @@ import httpx
 import polars as pl
 
 from qore_data.fetcher._base import (
-    _ANNOUNCE_URL,
-    BaseJsonFetcher,
     _frame_from_records,
     _parse_date,
     _symbol_digits,
+)
+from qore_data.fetcher.eastmoney import (
+    _ANNOUNCE_URL,
+    BaseJsonFetcher,
 )
 
 logger = logging.getLogger(__name__)

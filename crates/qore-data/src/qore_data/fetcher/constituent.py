@@ -20,15 +20,17 @@ import xlrd
 
 from qore_data.fetcher._base import (
     _CSINDEX_URL_TEMPLATE,
-    _FUNDZTAPI_URL,
-    BaseJsonFetcher,
     _empty_frame,
     _exchange_from_stock_code,
     _frame_from_rows,
     _symbol_digits,
     _to_float,
 )
-from qore_data.fetcher.http import RequestSpec
+from qore_data.fetcher.eastmoney import (
+    _FUNDZTAPI_URL,
+    BaseJsonFetcher,
+    RequestSpec,
+)
 from qore_data.fetcher.xueqiu import _xq_symbol, _XueqiuSession
 
 logger = logging.getLogger(__name__)
